@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>spark.md</title>
+<meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+
+<style>
+/* https://github.com/microsoft/vscode/blob/master/extensions/markdown-language-features/media/markdown.css */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+body {
+	font-family: var(--vscode-markdown-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif);
+	font-size: var(--vscode-markdown-font-size, 14px);
+	padding: 0 26px;
+	line-height: var(--vscode-markdown-line-height, 22px);
+	word-wrap: break-word;
+}
+
+#code-csp-warning {
+	position: fixed;
+	top: 0;
+	right: 0;
+	color: white;
+	margin: 16px;
+	text-align: center;
+	font-size: 12px;
+	font-family: sans-serif;
+	background-color:#444444;
+	cursor: pointer;
+	padding: 6px;
+	box-shadow: 1px 1px 1px rgba(0,0,0,.25);
+}
+
+#code-csp-warning:hover {
+	text-decoration: none;
+	background-color:#007acc;
+	box-shadow: 2px 2px 2px rgba(0,0,0,.25);
+}
+
+body.scrollBeyondLastLine {
+	margin-bottom: calc(100vh - 22px);
+}
+
+body.showEditorSelection .code-line {
+	position: relative;
+}
+
+body.showEditorSelection .code-active-line:before,
+body.showEditorSelection .code-line:hover:before {
+	content: "";
+	display: block;
+	position: absolute;
+	top: 0;
+	left: -12px;
+	height: 100%;
+}
+
+body.showEditorSelection li.code-active-line:before,
+body.showEditorSelection li.code-line:hover:before {
+	left: -30px;
+}
+
+.vscode-light.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.15);
+}
+
+.vscode-light.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.40);
+}
+
+.vscode-light.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-dark.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.4);
+}
+
+.vscode-dark.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.60);
+}
+
+.vscode-dark.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-high-contrast.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 160, 0, 0.7);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 160, 0, 1);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+img {
+	max-width: 100%;
+	max-height: 100%;
+}
+
+a {
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+a:focus,
+input:focus,
+select:focus,
+textarea:focus {
+	outline: 1px solid -webkit-focus-ring-color;
+	outline-offset: -1px;
+}
+
+hr {
+	border: 0;
+	height: 2px;
+	border-bottom: 2px solid;
+}
+
+h1 {
+	padding-bottom: 0.3em;
+	line-height: 1.2;
+	border-bottom-width: 1px;
+	border-bottom-style: solid;
+}
+
+h1, h2, h3 {
+	font-weight: normal;
+}
+
+table {
+	border-collapse: collapse;
+}
+
+table > thead > tr > th {
+	text-align: left;
+	border-bottom: 1px solid;
+}
+
+table > thead > tr > th,
+table > thead > tr > td,
+table > tbody > tr > th,
+table > tbody > tr > td {
+	padding: 5px 10px;
+}
+
+table > tbody > tr + tr > td {
+	border-top: 1px solid;
+}
+
+blockquote {
+	margin: 0 7px 0 5px;
+	padding: 0 16px 0 10px;
+	border-left-width: 5px;
+	border-left-style: solid;
+}
+
+code {
+	font-family: Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace, "Droid Sans Fallback";
+	font-size: 1em;
+	line-height: 1.357em;
+}
+
+body.wordWrap pre {
+	white-space: pre-wrap;
+}
+
+pre:not(.hljs),
+pre.hljs code > div {
+	padding: 16px;
+	border-radius: 3px;
+	overflow: auto;
+}
+
+pre code {
+	color: var(--vscode-editor-foreground);
+	tab-size: 4;
+}
+
+/** Theming */
+
+.vscode-light pre {
+	background-color: rgba(220, 220, 220, 0.4);
+}
+
+.vscode-dark pre {
+	background-color: rgba(10, 10, 10, 0.4);
+}
+
+.vscode-high-contrast pre {
+	background-color: rgb(0, 0, 0);
+}
+
+.vscode-high-contrast h1 {
+	border-color: rgb(0, 0, 0);
+}
+
+.vscode-light table > thead > tr > th {
+	border-color: rgba(0, 0, 0, 0.69);
+}
+
+.vscode-dark table > thead > tr > th {
+	border-color: rgba(255, 255, 255, 0.69);
+}
+
+.vscode-light h1,
+.vscode-light hr,
+.vscode-light table > tbody > tr + tr > td {
+	border-color: rgba(0, 0, 0, 0.18);
+}
+
+.vscode-dark h1,
+.vscode-dark hr,
+.vscode-dark table > tbody > tr + tr > td {
+	border-color: rgba(255, 255, 255, 0.18);
+}
+
+</style>
+
+<style>
+/* Tomorrow Theme */
+/* http://jmblog.github.com/color-themes-for-google-code-highlightjs */
+/* Original theme - https://github.com/chriskempson/tomorrow-theme */
+
+/* Tomorrow Comment */
+.hljs-comment,
+.hljs-quote {
+	color: #8e908c;
+}
+
+/* Tomorrow Red */
+.hljs-variable,
+.hljs-template-variable,
+.hljs-tag,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-regexp,
+.hljs-deletion {
+	color: #c82829;
+}
+
+/* Tomorrow Orange */
+.hljs-number,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-literal,
+.hljs-type,
+.hljs-params,
+.hljs-meta,
+.hljs-link {
+	color: #f5871f;
+}
+
+/* Tomorrow Yellow */
+.hljs-attribute {
+	color: #eab700;
+}
+
+/* Tomorrow Green */
+.hljs-string,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition {
+	color: #718c00;
+}
+
+/* Tomorrow Blue */
+.hljs-title,
+.hljs-section {
+	color: #4271ae;
+}
+
+/* Tomorrow Purple */
+.hljs-keyword,
+.hljs-selector-tag {
+	color: #8959a8;
+}
+
+.hljs {
+	display: block;
+	overflow-x: auto;
+	color: #4d4d4c;
+	padding: 0.5em;
+}
+
+.hljs-emphasis {
+	font-style: italic;
+}
+
+.hljs-strong {
+	font-weight: bold;
+}
+</style>
+
+<style>
+/*
+ * Markdown PDF CSS
+ */
+
+ body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "Meiryo";
+	padding: 0 12px;
+}
+
+pre {
+	background-color: #f8f8f8;
+	border: 1px solid #cccccc;
+	border-radius: 3px;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+}
+
+pre:not(.hljs) {
+	padding: 23px;
+	line-height: 19px;
+}
+
+blockquote {
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(0, 122, 204, 0.5);
+}
+
+.emoji {
+	height: 1.4em;
+}
+
+code {
+	font-size: 14px;
+	line-height: 19px;
+}
+
+/* for inline code */
+:not(pre):not(.hljs) > code {
+	color: #C9AE75; /* Change the old color so it seems less like an error */
+	font-size: inherit;
+}
+
+/* Page Break : use <div class="page"/> to insert page break
+-------------------------------------------------------- */
+.page {
+	page-break-after: always;
+}
+
+</style>
+
+<script src="https://unpkg.com/mermaid/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast')
+          ? 'dark'
+          : 'default'
+    });
+  </script>
+<h1 id="koordinator-spark-%E4%BD%9C%E4%B8%9A%E6%89%98%E7%AE%A1%E6%9C%80%E4%BD%B3%E5%AE%9E%E8%B7%B5">koordinator Spark 作业托管最佳实践</h1>
+<p>参考自koordinator官网</p>
+<pre class="hljs"><code><div>https://koordinator.sh/zh-Hans/docs/best-practices/colocation-of-spark-jobs/
+</div></code></pre>
+<h2 id="%E4%B8%8B%E8%BD%BDkoordinator%E6%BA%90%E7%A0%81">下载koordinator源码</h2>
+<pre class="hljs"><code><div>wget https://github.com/koordinator-sh/koordinator/archive/refs/tags/v1.4.0.tar.gz
+</div></code></pre>
+<h2 id="%E4%BD%BF%E7%94%A8helm%E5%AE%89%E8%A3%85apache-spark-operator">使用helm安装Apache Spark Operator</h2>
+<p>进入源码目录</p>
+<pre class="hljs"><code><div>cd koordinator-1.4.0/examples
+</div></code></pre>
+<p>创建命名空间</p>
+<pre class="hljs"><code><div>kubectl create namespace spark-operator
+</div></code></pre>
+<p>使用helm 创建spark operator</p>
+<pre class="hljs"><code><div>helm install koord-spark-operator ./spark-operator-chart/ --namespace spark-operator
+</div></code></pre>
+<p>验证spark 是否成功运行</p>
+<pre class="hljs"><code><div>helm status --namespace spark-operator koord-spark-operator
+</div></code></pre>
+<p>创建命名空间spark-demo和服务帐户spark</p>
+<pre class="hljs"><code><div>kubectl apply -f examples/spark-jobs/service-account.yaml
+</div></code></pre>
+<p>创建 Colocation Profile,以便在命名空间 Spark-demo 中创建的所有 Pod 都将以 Colocation 模式运行</p>
+<pre class="hljs"><code><div>kubectl apply -f examples/spark-jobs/cluster-colocation-profile.yaml
+</div></code></pre>
+<p>cluster-colocation-profile.yaml</p>
+<pre class="hljs"><code><div>apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark-demo
+  labels:
+    koordinator.sh/enable-colocation: &quot;true&quot;
+---
+apiVersion: config.koordinator.sh/v1alpha1
+kind: ClusterColocationProfile
+metadata:
+  name: spark-demo
+spec:
+  namespaceSelector:
+    matchLabels:
+      koordinator.sh/enable-colocation: &quot;true&quot; // 
+  selector:
+    matchLabels:
+      sparkoperator.k8s.io/launched-by-spark-operator: &quot;true&quot;
+  qosClass: BE
+  priorityClassName: koord-batch
+  koordinatorPriority: 1000
+  schedulerName: koord-scheduler
+</div></code></pre>
+<ul>
+<li>qosClass是服务质量，分别有枚举类型LSE、LSR、LS、BE 和 SYSTEM</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>SYSTEM</th>
+<th>系统进程，资源受限	对于 DaemonSets 等系统服务，虽然需要保证系统服务的延迟，但也需要限制节点上这些系统服务容器的资源使用，以确保其不占用过多的资源</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LSE(Latency Sensitive Exclusive)</td>
+<td>保留资源并组织同 QoS 的 pod 共享资源	很少使用，常见于中间件类应用，一般在独立的资源池中使用</td>
+</tr>
+<tr>
+<td>LSR(Latency Sensitive Reserved)</td>
+<td>预留资源以获得更好的确定性	类似于社区的 Guaranteed，CPU 核被绑定</td>
+</tr>
+<tr>
+<td>LS(Latency Sensitive)</td>
+<td>共享资源，对突发流量有更好的弹性	微服务工作负载的典型QoS级别，实现更好的资源弹性和更灵活的资源调整能力</td>
+</tr>
+<tr>
+<td>BE(Best Effort)</td>
+<td>共享不包括 LSE 的资源，资源运行质量有限，甚至在极端情况下被杀死	批量作业的典型 QoS 水平，在一定时期内稳定的计算吞吐量，低成本资源</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>priorityClassName</li>
+</ul>
+<p>指定要写入到 Pod.Spec.PriorityClassName 中的 Kubenretes PriorityClass. 选项为 koord-prod、koord-mid、koord-batch 和 koord-free。</p>
+<p>优先级:</p>
+<table>
+<thead>
+<tr>
+<th>PriorityClass</th>
+<th>优先级范围</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>koord-prod</td>
+<td>[9000, 9999]	需要提前规划资源配额，并且保证在配额内成功。</td>
+<td></td>
+</tr>
+<tr>
+<td>koord-mid</td>
+<td>[7000, 7999]	需要提前规划资源配额，并且保证在配额内成功。</td>
+<td></td>
+</tr>
+<tr>
+<td>koord-batch</td>
+<td>[5000, 5999]	需要提前规划资源配额，一般允许借用配额。</td>
+<td></td>
+</tr>
+<tr>
+<td>koord-free</td>
+<td>[3000, 3999]	不保证资源配额，可分配的资源总量取决于集群的总闲置资源。</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>koordinatorPriority要和 priorityClassName 搭配使用，比如</p>
+<pre class="hljs"><code><div>koord-prod =&gt; 9911
+</div></code></pre>
+<p>schedulerName: 如果指定，则 Pod 将由指定的调度器调度。
+Koordinator 在 Kubernetes 集群中部署时会初始化这四个 PriorityClass。</p>
+<pre class="hljs"><code><div>apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: koord-prod
+value: 9000
+description: &quot;This priority class should be used for prod service pods only.&quot;
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: koord-mid
+value: 7000
+description: &quot;This priority class should be used for mid service pods only.&quot;
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: koord-batch
+value: 5000
+description: &quot;This priority class should be used for batch service pods only.&quot;
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: koord-free
+value: 3000
+description: &quot;This priority class should be used for free service pods only.&quot;
+</div></code></pre>
+<p>schedulerName: koord-scheduler,配置在configMap里</p>
+<pre class="hljs"><code><div>
+Koord-Scheduler
+Koord-Scheduler 以 Deployment 的形式部署在集群中，用于增强 Kubernetes 在 QoS-aware，差异化 SLO 以及任务调度场景的资源调度能力，具体包括:
+
+QoS-aware 调度，包括负载感知调度让节点间负载更佳平衡，资源超卖的方式支持运行更多的低优先级工作负载。
+差异化 SLO，包括 CPU 精细化编排，为不同的工作负载提供不同的 QoS 隔离策略（cfs，LLC，memory 带宽，网络带宽，磁盘io）。
+任务调度，包括弹性额度管理，Gang 调度，异构资源调度等，以支持更好的运行大数据和 AI 工作负载。
+为了更好的支持不同类型的工作负载，Koord-scheduler 还包括了一些通用性的能力增强：
+
+Reservation，支持为特定的 Pod 或者工作负载预留节点资源。资源预留特性广泛应用于重调度，资源抢占以及节点碎片整理等相关优化过程。
+Node Reservation，支持为 kubernetes 之外的工作负载预留节点资源，一般应用于节点上运行着非容器化的负载场景。
+
+</div></code></pre>
+<p>configMap 定义：</p>
+<pre class="hljs"><code><div>apiVersion: v1
+data:
+  koord-scheduler-config: |
+    apiVersion: kubescheduler.config.k8s.io/v1beta2
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceLock: leases
+      resourceName: koord-scheduler
+      resourceNamespace: koordinator-system
+    profiles:
+      - pluginConfig:
+        - name: NodeResourcesFit
+          args:
+            apiVersion: kubescheduler.config.k8s.io/v1beta2
+            kind: NodeResourcesFitArgs
+            scoringStrategy:
+              type: LeastAllocated
+              resources:
+                - name: cpu
+                  weight: 1
+                - name: memory
+                  weight: 1
+                - name: &quot;kubernetes.io/batch-cpu&quot;
+                  weight: 1
+                - name: &quot;kubernetes.io/batch-memory&quot;
+                  weight: 1
+        - name: LoadAwareScheduling
+          args:
+            apiVersion: kubescheduler.config.k8s.io/v1beta2
+            kind: LoadAwareSchedulingArgs
+            filterExpiredNodeMetrics: false
+            nodeMetricExpirationSeconds: 300
+            resourceWeights:
+              cpu: 1
+              memory: 1
+            usageThresholds:
+              cpu: 65
+              memory: 95
+            # disable by default
+            # prodUsageThresholds indicates the resource utilization threshold of Prod Pods compared to the whole machine.
+            # prodUsageThresholds:
+            #   cpu: 55
+            #   memory: 75
+            # scoreAccordingProdUsage controls whether to score according to the utilization of Prod Pod
+            # scoreAccordingProdUsage: true
+            # aggregated supports resource utilization filtering and scoring based on percentile statistics
+            # aggregated:
+            #   usageThresholds:
+            #     cpu: 65
+            #     memory: 95
+            #   usageAggregationType: &quot;p95&quot;
+            #   scoreAggregationType: &quot;p95&quot;
+            estimatedScalingFactors:
+              cpu: 85
+              memory: 70
+        - name: ElasticQuota
+          args:
+            apiVersion: kubescheduler.config.k8s.io/v1beta2
+            kind: ElasticQuotaArgs
+            quotaGroupNamespace: koordinator-system
+        plugins:
+          queueSort:
+            disabled:
+              - name: &quot;*&quot;
+            enabled:
+              - name: Coscheduling
+          preFilter:
+            enabled:
+              - name: Reservation
+              - name: NodeNUMAResource
+              - name: DeviceShare
+              - name: Coscheduling
+              - name: ElasticQuota
+          filter:
+            enabled:
+              - name: LoadAwareScheduling
+              - name: NodeNUMAResource
+              - name: DeviceShare
+              - name: Reservation
+          postFilter:
+            disabled:
+              - name: &quot;*&quot;
+            enabled:
+              - name: Reservation
+              - name: Coscheduling
+              - name: ElasticQuota
+              - name: DefaultPreemption
+          preScore:
+            enabled:
+              - name: Reservation # The Reservation plugin must come first
+          score:
+            enabled:
+              - name: LoadAwareScheduling
+                weight: 1
+              - name: NodeNUMAResource
+                weight: 1
+              - name: DeviceShare
+                weight: 1
+              - name: Reservation
+                weight: 5000
+          reserve:
+            enabled:
+              - name: Reservation # The Reservation plugin must come first
+              - name: LoadAwareScheduling
+              - name: NodeNUMAResource
+              - name: DeviceShare
+              - name: Coscheduling
+              - name: ElasticQuota
+          permit:
+            enabled:
+              - name: Coscheduling
+          preBind:
+            enabled:
+              - name: NodeNUMAResource
+              - name: DeviceShare
+              - name: Reservation
+              - name: DefaultPreBind
+          bind:
+            disabled:
+              - name: &quot;*&quot;
+            enabled:
+              - name: Reservation
+              - name: DefaultBinder
+          postBind:
+            enabled:
+              - name: Coscheduling
+        schedulerName: koord-scheduler
+kind: ConfigMap
+metadata:
+  annotations:
+    meta.helm.sh/release-name: koordinator
+    meta.helm.sh/release-namespace: default
+  creationTimestamp: &quot;2024-01-27T19:14:20Z&quot;
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  name: koord-scheduler-config
+  namespace: koordinator-system
+  resourceVersion: &quot;125368&quot;
+  uid: 547aadc7-0b9e-4a52-b4ab-f5954bd6d78d
+
+</div></code></pre>
+<p>使用以下命令将 Spark TC 示例作业提交到命名空间 Spark-demo：</p>
+<pre class="hljs"><code><div>kubectl apply -f examples/spark-jobs/spark-tc-complex.yaml
+</div></code></pre>
+<p>提交spark tc 作业</p>
+<pre class="hljs"><code><div>kubectl apply -f examples/spark-jobs/spark-tc-complex.yaml
+</div></code></pre>
+<p>检查spark 应用的状态：</p>
+<pre class="hljs"><code><div>kubectl get sparkapplication -n spark-demo spark-tc-complex
+</div></code></pre>
+<p>实际服务器只有4C 所以需要下降spark 内存的限制，修改spark-tc-complex.yaml.</p>
+<pre class="hljs"><code><div>apiVersion: &quot;sparkoperator.k8s.io/v1beta2&quot;
+kind: SparkApplication
+metadata:
+  namespace: spark-demo
+  name: spark-tc-complex
+spec:
+  type: Scala
+  mode: cluster
+  image: &quot;docker.io/koordinatorsh/spark:v3.2.1-koord-examples&quot;
+  imagePullPolicy: IfNotPresent
+  mainClass: org.apache.spark.examples.SparkTC
+  mainApplicationFile: &quot;local:///opt/spark/examples/jars/spark-examples_2.12-3.2.1-tc1.3.jar&quot;
+  sparkVersion: &quot;3.2.1&quot;
+  restartPolicy:
+    type: Never
+  volumes:
+    - name: &quot;test-volume&quot;
+      hostPath:
+        path: &quot;/tmp&quot;
+        type: Directory
+  driver:
+    cores: 1
+    coreLimit: &quot;1&quot;
+    memory: &quot;1g&quot;
+    labels:
+      version: 3.2.1
+    serviceAccount: spark
+    volumeMounts:
+      - name: &quot;test-volume&quot;
+        mountPath: &quot;/tmp&quot;
+  executor:
+    cores: 1
+    coreLimit: &quot;1&quot;
+    instances: 1
+    memory: &quot;1g&quot;
+    labels:
+      version: 3.2.1
+    volumeMounts:
+      - name: &quot;test-volume&quot;
+        mountPath: &quot;/tmp&quot;
+</div></code></pre>
+<p>发现之前的cpu 内存使用并没有使用那么多</p>
+<pre class="hljs"><code><div>$ kubectl describe node
+    Allocated resources:
+    Resource                 Requests
+    cpu                      7620m (95.25%)
+  
+$ kubectl top node
+    NAME                            CPU(cores)              CPU%
+    cn-hangzhou.your-node-1         1190m                   14.8%
+    cn-hangzhou.your-node-2         1620m                   20.25%
+</div></code></pre>
+<p>调度后:</p>
+<pre class="hljs"><code><div>root@iZbp118td5g42g53vdnvgrZ:~/koordinator-1.4.0# kubectl top node
+NAME                      CPU(cores)   CPU%   MEMORY(bytes)   MEMORY%   
+izbp118td5g42g53vdnvgqz   2463m        61%    3903Mi          54%       
+izbp118td5g42g53vdnvgrz   163m         4%     1524Mi          21%
+</div></code></pre>
+<p>总结：</p>
+<p>使用 cluster-colocation-profile.yaml 托管运行后主机的cpu 使用了明显提高了，减少了cpu调度的浪费</p>
+
+</body>
+</html>
