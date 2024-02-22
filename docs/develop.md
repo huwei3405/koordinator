@@ -133,3 +133,11 @@ https://blog.csdn.net/qq_44743171/article/details/132775517
 运行结果:
 
 ![img](develop4.png)
+
+## 五 安装koordnaitor的k8s资源
+
+如果报缺少一些资源 请去charts 上翻阅并且安装对应k8s资源,charts地址
+
+```
+https://github.com/koordinator-sh/charts/tree/main/versions/v1.4.0/templates
+```
