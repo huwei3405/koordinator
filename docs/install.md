@@ -31,6 +31,34 @@ kubeadm、kubelet、 kubectl、Containerd 、helm
 
 ![img](1.jpg)
 
+设置镜像源 Centos:
+
+CentOS / RHEL / Fedora
+```
+cat <<EOF | tee /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/rpm/repodata/repomd.xml.key
+EOF
+setenforce 0
+yum install -y kubelet kubeadm kubectl
+systemctl enable kubelet && systemctl start kubele
+```
+
+Debian / Ubuntu
+```
+apt-get update && apt-get install -y apt-transport-https
+curl -fsSL https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/deb/Release.key |
+    gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/deb/ /" |
+    tee /etc/apt/sources.list.d/kubernetes.list
+apt-get update
+apt-get install -y kubelet kubeadm kubectl
+```
+
 #####（2）Containerd安装
 
 ① 直接通过添加docker 官方软件包源安装一个名为containerd.io 包
@@ -41,9 +69,20 @@ kubeadm、kubelet、 kubectl、Containerd 、helm
 
 ④ 其它系统可以根据自己系统选择安装 https://docs.docker.com/engine/install/
 
+Centos:
+```
+sudo yum install -y yum-utils
+sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+sudo yum install containerd.io
+```
+
 #####（3）Helm 安装
 
 ① 根据官方文档选择好自己的系统进行安装https://helm.sh/zh/docs/intro/install/
+
+```
+
+```
 
 ## 四．启动Kubernetes
 
