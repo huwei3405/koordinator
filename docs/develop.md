@@ -1,5 +1,11 @@
 # **Kubernetes****&koordinator开发教程**
 
+## golang 安装
+Centos7.9
+```
+yum install golang
+```
+
 ##  一．搭建开发环境
 
 1．安装kind

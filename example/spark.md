@@ -385,7 +385,7 @@ error: Metrics API not available
 请安装metric-server,components.yaml位于项目最外层目录
 ```
 kubectl apply -f components.yaml
-```
+``` 
 
 调度后:
 ```
