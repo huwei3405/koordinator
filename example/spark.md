@@ -376,6 +376,17 @@ $ kubectl top node
     cn-hangzhou.your-node-2         1620m                   20.25%
 ```
 
+如果 kubectl top node 出现错误
+
+```
+error: Metrics API not available
+```
+
+请安装metric-server,components.yaml位于项目最外层目录
+```
+kubectl apply -f components.yaml
+```
+
 调度后:
 ```
 root@iZbp118td5g42g53vdnvgrZ:~/koordinator-1.4.0# kubectl top node
