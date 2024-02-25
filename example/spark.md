@@ -311,7 +311,7 @@ kubectl apply -f examples/spark-jobs/spark-tc-complex.yaml
 kubectl get sparkapplication -n spark-demo spark-tc-complex
 ```
 
-实际服务器只有4C 所以需要下降spark 内存的限制，修改spark-tc-complex.yaml.
+实际服务器只有4C 所以需要下降spark cpu 内存的限制，修改spark-tc-complex.yaml.
 ```
 apiVersion: "sparkoperator.k8s.io/v1beta2"
 kind: SparkApplication
@@ -354,6 +354,13 @@ spec:
       - name: "test-volume"
         mountPath: "/tmp"
 ```
+
+如果双节点，node 节点没有那么多内存可以加入master 节点，使用 
+
+```
+kubectl uncordon {master-name}
+```
+这样master节点也可以被调度了
 
 发现之前的cpu 内存使用并没有使用那么多
 
