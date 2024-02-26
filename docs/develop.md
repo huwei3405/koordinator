@@ -136,6 +136,17 @@ https://blog.csdn.net/qq_44743171/article/details/132775517
 }
 ```
 
+检查sock目录是否存在，/host-var-run-koordlet/：
+```
+mkdir /host-var-run-koordlet/
+```
+
+检查是否存在~/.kube/config,如果存在 /etc/kubernetes/admin.conf，则运行
+
+```
+cp /etc/kubernetes/admin.conf ~/.kube/config 
+```
+
 运行结果:
 
 ![img](develop4.png)
