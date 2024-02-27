@@ -116,11 +116,11 @@ https://blog.csdn.net/qq_44743171/article/details/132775517
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Launch Package",
+            "name": "koordlet",
             "type": "go",
             "request": "launch",
             "mode": "auto",
-            "program": "/home/eoi/koordinator/cmd/koordlet",
+            "program": "${workspaceFolder}/cmd/koordlet",
             "env": {"NODE_NAME":"vm48", "agent_mode": "hostMode"},
             "args": [
                 "-cgroup-root-dir=/sys/fs/",
@@ -130,6 +130,51 @@ https://blog.csdn.net/qq_44743171/article/details/132775517
                 "-runtime-hooks-host-endpoint=/var/run/koordlet//koordlet.sock",
                 "--logtostderr=true",
                 "--v=4",
+            ],
+        },
+        {
+            "name": "koord-runtime-proxy",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/koord-runtime-proxy",
+            "env": {"NODE_NAME":"vm48", "agent_mode": "hostMode"},
+            "args": [
+                "--remote-runtime-service-endpoint",
+                "/run/containerd/containerd.sock"
+            ],
+        },
+        {
+            "name": "koord-scheduler",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/koord-scheduler",
+            "args": [
+                "--kubeconfig",
+                "/root/.kube/config"
+            ],
+        },
+        {
+            "name": "koord-manager",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/koord-manager",
+            "args": [
+                "--kubeconfig",
+                "/root/.kube/config"
+            ],
+        },
+        {
+            "name": "koord-descheduler",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/koord-descheduler",
+            "args": [
+                "--v=4",
+                "--config=/config/koord-descheduler.config"
             ],
         }
     ]
