@@ -1596,3 +1596,32 @@ koordinator 使用 FindSupportedEvictVersion发现驱逐器版本。
 QoS Manager 协调一组插件，这些插件负责按优先级保障 SLO，减少 Pod 之间的干扰。插件根据资源分析、干扰检测以及 SLO 策略配置，在不同场景下动态调整资源参数配置。通常来说，每个插件都会在资源调参过程中生成对应的执行计划。
 
 QoS Manager 可能是迭代频率最高的模块，扩展了新的插件，更新了策略算法并添加了策略执行方式。 一个新的插件应该实现包含一系列标准API的接口，确保 QoS Manager 的核心部分简单且具有较好的可维护性。 高级插件（例如用于干扰检测的插件）会随着时间的推移变得更加复杂，在孵化已经稳定在 QoS Manager 中之后，它可能会成为一个独立的模块。
+
+qosManager 启动代码，文件位置:
+
+```
+pkg/koordlet/qosmanager/qosmanager.go
+```
+
+NewQOSManager 核心代码:
+
+```
+evictor := framework.NewEvictor(kubeClient, recorder, evictVersion)
+opt := &framework.Options{
+	CgroupReader:        cgroupReader,
+	StatesInformer:      statesInformer,
+	MetricCache:         metricCache,
+	EventRecorder:       recorder,
+	KubeClient:          kubeClient,
+	EvictVersion:        evictVersion,
+	Config:              cfg,
+	MetricAdvisorConfig: metricAdvisorConfig,
+}
+
+ctx := &framework.Context{
+	Evictor:    evictor,
+	Strategies: make(map[string]framework.QOSStrategy, len(plugins.StrategyPlugins)),
+}
+```
+
+#### (1) blkIOReconcile
