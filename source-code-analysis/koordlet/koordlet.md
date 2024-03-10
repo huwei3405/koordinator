@@ -938,7 +938,650 @@ for name, collector := range m.context.Collectors {
 	go collector.Run(stopCh)
 	klog.V(4).Infof("collector %v start", name)
 }
+
 ```
+
+#### (1) gpuCollector
+
+##### 安装gpu设备管理器
+
+代码位于：
+
+```
+pkg/koordlet/metricsadvisor/devices/gpu/collector_gpu_linux.go
+```
+
+这个类获取gpu核心数据使用的英伟达第三方库
+
+```
+"github.com/NVIDIA/go-nvml/pkg/nvml"
+```
+
+安装：
+```
+func (g *gpuCollector) Setup(fra *framework.Context) {
+	g.gpuDeviceManager = initGPUDeviceManager()
+}
+```
+
+GPUDeviceManager 初始化核心函数是initGPUData
+
+```
+func (g *gpuDeviceManager) initGPUData() error {
+	// 获取gpu 总数
+	count, ret := nvml.DeviceGetCount()
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("unable to get device count: %v", nvml.ErrorString(ret))
+	}
+	if count == 0 {
+		return errors.New("no gpu device found")
+	}
+	devices := make([]*device, count)
+	for deviceIndex := 0; deviceIndex < count; deviceIndex++ {
+		// 获取每块gpu的句柄
+		gpudevice, ret := nvml.DeviceGetHandleByIndex(deviceIndex)
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("unable to get device at index %d: %v", deviceIndex, nvml.ErrorString(ret))
+		}
+		// 获取gpu的uuid
+		uuid, ret := gpudevice.GetUUID()
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("unable to get device uuid: %v", nvml.ErrorString(ret))
+		}
+
+		// 获取gpu的镜像数量
+		minor, ret := gpudevice.GetMinorNumber()
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("unable to get device minor number: %v", nvml.ErrorString(ret))
+		}
+
+		// 获取gpu的内存信息
+		memory, ret := gpudevice.GetMemoryInfo()
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("unable to get device memory info: %v", nvml.ErrorString(ret))
+		}
+		// 获取pci总线信息
+		pciInfo, ret := gpudevice.GetPciInfo()
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("unable to get pci info: %v", nvml.ErrorString(ret))
+		}
+		nodeID, pcie, busID, err := parseGPUPCIInfo(pciInfo.BusIdLegacy)
+		if err != nil {
+			return err
+		}
+		// 存到devices 里面，保存gpu 所有设备信息
+		devices[deviceIndex] = &device{
+			DeviceUUID:  uuid,
+			Minor:       int32(minor),
+			MemoryTotal: memory.Total,
+			NodeID:      nodeID,
+			PCIE:        pcie,
+			BusID:       busID,
+			Device:      gpudevice,
+		}
+	}
+
+	g.Lock()
+	defer g.Unlock()
+	g.deviceCount = count
+	g.devices = devices
+	return nil
+}
+```
+
+通过外部gpuCollector定时调用gpuDeviceManager->collectGPUUsage,生成进程对GPU使用的指标
+
+```
+processesGPUUsages := make(map[uint32][]*rawGPUMetric)
+	// 遍历所有GPU
+	for deviceIndex, gpuDevice := range g.devices {
+		// 获取gpu上正在运行的进程
+		processesInfos, ret := gpuDevice.Device.GetComputeRunningProcesses()
+		if ret != nvml.SUCCESS {
+			klog.Warningf("Unable to get process info for device at index %d: %v", deviceIndex, nvml.ErrorString(ret))
+			continue
+		}
+		// 获取进程利用率
+		processUtilizations, ret := gpuDevice.Device.GetProcessUtilization(1024)
+		if ret != nvml.SUCCESS {
+			klog.Warningf("Unable to get process utilization for device at index %d: %v", deviceIndex, nvml.ErrorString(ret))
+			continue
+		}
+
+		// Sort by pid.
+		sort.Slice(processesInfos, func(i, j int) bool {
+			return processesInfos[i].Pid < processesInfos[j].Pid
+		})
+		sort.Slice(processUtilizations, func(i, j int) bool {
+			return processUtilizations[i].Pid < processUtilizations[j].Pid
+		})
+
+		klog.V(3).Infof("Found %d processes on device %d\n", len(processesInfos), deviceIndex)
+		for _, info := range processesInfos {
+			var utilization *nvml.ProcessUtilizationSample
+			for i := range processUtilizations {
+				if processUtilizations[i].Pid == info.Pid {
+					utilization = &processUtilizations[i]
+					break
+				}
+			}
+			if utilization == nil {
+				continue
+			}
+			if _, ok := processesGPUUsages[info.Pid]; !ok {
+				// pid not exist.
+				// init processes gpu metric array.
+				processesGPUUsages[info.Pid] = make([]*rawGPUMetric, g.deviceCount)
+			}
+			// 把进程利用率信息存储到processesGPUUsages
+			processesGPUUsages[info.Pid][deviceIndex] = &rawGPUMetric{
+				SMUtil:     utilization.SmUtil,
+				MemoryUsed: info.UsedGpuMemory,
+			}
+		}
+	}
+	g.Lock()
+	g.processesMetrics = processesGPUUsages
+	g.collectTime = time.Now()
+	g.start.Store(true)
+	g.Unlock()
+```
+
+然后对gpuDeviceManager 暴露以下接口。拱其获取指标
+
+```
+getPodGPUUsage
+getContainerGPUUsage
+getPodOrContainerTotalGPUUsageOfPIDs
+getNodeGPUUsage
+```
+
+最后GPUCollector 通过以下接口把gpuDeviceManager的接口对外暴露
+
+```
+gpuCollector->Infos
+gpuCollector->GetNodeMetric
+gpuCollector->GetPodMetric
+gpuCollector->GetContainerMetric
+```
+
+#### (2) noderesource
+
+收集node的资源信息，包括node的cpu和memory，以及node上运行的pod的cpu和memory。核心代码位于:
+
+```
+pkg/koordlet/metricsadvisor/collectors/noderesource/node_resource_collector.go
+```
+
+我们只看核心函数 collectNodeResUsed, noderesource 会定期调用collectNodeResUsed给外部使用
+
+只看几段核心代码:
+
+读取 /proc/stat，获取cpu使用情况
+
+```
+currentCPUTick, err0 := koordletutil.GetCPUStatUsageTicks()
+```
+
+读取 /proc/meminfo 读取内存使用情况
+
+```
+memInfo, err1 := koordletutil.GetMemInfo()
+```
+
+n.deviceCollectors 只有gpu 的 使用情况
+
+```
+nodeMetrics = append(nodeMetrics, cpuUsageMetrics)
+
+for name, deviceCollector := range n.deviceCollectors {
+	if !deviceCollector.Enabled() {
+		klog.V(6).Infof("skip node metrics from the disabled device collector %s", name)
+		continue
+	}
+
+	if metric, err := deviceCollector.GetNodeMetric(); err != nil {
+		klog.Warningf("get node metrics from the device collector %s failed, err: %s", name, err)
+	} else {
+		nodeMetrics = append(nodeMetrics, metric...)
+	}
+	if info := deviceCollector.Infos(); info != nil {
+		n.metricDB.Set(info.Type(), info)
+	}
+}
+```
+
+最后把组合好的数据存到tsdb里
+
+```
+appender := n.appendableDB.Appender()
+if err := appender.Append(nodeMetrics); err != nil {
+	klog.ErrorS(err, "Append node metrics error")
+	return
+}
+```
+
+#### (3) nodeInfoCollector
+
+核心代码位于:
+
+```
+pkg/koordlet/metricsadvisor/collectors/noderesource/node_info_collector.go
+```
+
+nodeInfoCollector 的核心采集函数是 nodeInfoCollector->collectNodeInfo,这个函数核心调用了两个子函数用来收集node cpu 以及内存信息，分别是collectNodeCPUInfo和collectNodeNUMAInfo。
+
+#### (4) collectNodeCPUInfo
+
+本质是通过 
+
+```
+localCPUInfo, err := koordletutil.GetLocalCPUInfo()
+```
+
+调用
+
+```
+lscpu -e=CPU,NODE,SOCKET,CORE,CACHE,ONLINE
+```
+
+#### collectNodeNUMAInfo
+
+GetNodeNUMAInfo 主要是收集 /sys/bus/node/devices下的数据
+
+NUMA架构：
+
+
+
+大家从NUMA架构可以看出，每颗CPU之间是独立的，相互之间的内存是不影响的。每一颗CPU访问属于自己的内存，延迟是最小的。我们这里再混到前面的例子中：
+
+
+
+```
+numaNodeParentDir := system.GetSysNUMADir()
+nodeDirs, err := os.ReadDir(numaNodeParentDir)
+```
+
+读取numa 的内存信息
+
+```
+numaMemInfoPath := system.GetNUMAMemInfoPath(dirName)
+memInfo, err := readMemInfo(numaMemInfoPath, true)
+if err != nil {
+	klog.V(4).Infof("failed to read NUMA info, dir %s, err: %v", dirName, err)
+	continue
+}
+```
+
+#### 写入缓存
+
+写入缓存:
+
+```
+n.storage.Set(metriccache.NodeCPUInfoKey, nodeCPUInfo)
+n.storage.Set(metriccache.NodeNUMAInfoKey, nodeNUMAInfo)
+```
+
+### (5) nodestorageinfo
+
+定时调用 collectNodeLocalStorageInfo 收集 LocalStorageInfo，核心代码实现
+
+```
+pkg/koordlet/metricsadvisor/collectors/nodestorageinfo/node_info_collector.go
+```
+
+核心调用 
+
+```
+func GetLocalStorageInfo() (*LocalStorageInfo, error) {
+	s := &LocalStorageInfo{
+		DiskNumberMap:    make(map[string]string),
+		NumberDiskMap:    make(map[string]string),
+		PartitionDiskMap: make(map[string]string),
+		VGDiskMap:        make(map[string]string),
+		LVMapperVGMap:    make(map[string]string),
+		MPDiskMap:        make(map[string]string),
+	}
+
+	// 使用lsblk -P -o NAME,TYPE,MAJ:MIN
+	if err := s.scanDevices(); err != nil {
+		return nil, err
+	}
+	// sudo vgs --noheadings
+	if err := s.scanVolumeGroups(); err != nil {
+		return nil, err
+	}
+	// sudo lvs --noheadings
+	if err := s.scanLogicalVolumes(); err != nil {
+		return nil, err
+	}
+	// sudo findmnt -P -o TARGET,SOURCE
+	if err := s.scanMountPoints(); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+```
+
+收集到信息后写入缓存中
+
+```
+n.storage.Set(metriccache.NodeLocalStorageInfoKey, nodeLocalStorageInfo)
+```	
+
+
+### (6) podresource
+
+核心代码在
+
+```
+pkg/koordlet/metricsadvisor/collectors/podresource/pod_resource_collector.go
+```
+
+收集pod 资源信息最核心的代码在collectPodResUsed
+
+statesInformer 之前介绍过会把k8s metricServer的所有pod指标存到内存中
+
+```
+podMetas := p.statesInformer.GetAllPods()
+```
+
+然后遍历当前节点的pod 列表分别读取cpu 使用情况
+
+```
+// 实际就是读取 /sys/fs/cgroup/cpu/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod198f563c_7909_4997_9887_b69c5e345c2b.slice/cpuacct.usage
+currentCPUUsage, err0 := p.cgroupReader.ReadCPUAcctUsage(podCgroupDir)
+
+// 实际是读取/sys/fs/cgroup/memory/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod198f563c_7909_4997_9887_b69c5e345c2b.slice/memory.stat
+memStat, err1 := p.cgroupReader.ReadMemoryStat(podCgroupDir)
+```
+
+计算cpu 使用情况
+
+```
+cpuUsageValue := float64(currentCPUUsage-lastCPUStat.CPUUsage) / float64(collectTime.Sub(lastCPUStat.Timestamp))
+```
+
+获取内存使用情况
+
+```
+memUsageValue := memStat.Usage()
+```
+
+持久存入数据库
+
+```
+appender := p.appendableDB.Appender()
+if err := appender.Append(metrics); err != nil {
+	klog.Warningf("Append pod metrics error: %v", err)
+	return
+}
+
+if err := appender.Commit(); err != nil {
+	klog.Warningf("Commit pod metrics failed, error: %v", err)
+	return
+}
+
+p.sharedState.UpdatePodUsage(CollectorName, allCPUUsageCores, allMemoryUsage)
+```
+
+### (7) podthrottled
+
+这个模块是获取cpu 受限率的，核心代码在collectPodThrottledInfo,读取cgroup中pod使用数据信息
+
+```
+currentCPUStat, err := c.cgroupReader.ReadCPUStat(podCgroupDir)
+```
+
+计算pod cpu的受限率
+
+```
+func CalcCPUThrottledRatio(curPoint, prePoint *CPUStatRaw) float64 {
+	deltaPeriod := curPoint.NrPeriods - prePoint.NrPeriods
+	deltaThrottled := curPoint.NrThrottled - prePoint.NrThrottled
+	throttledRatio := float64(0)
+	if deltaPeriod > 0 {
+		throttledRatio = float64(deltaThrottled) / float64(deltaPeriod)
+	}
+	return throttledRatio
+}
+```
+
+pod受限率约低，就代表越有充足的资源
+
+### (8) performance
+
+使用 libpfm4 库 收集容器的cpu 使用情况，有开关控制，主要是为了看性能问题，收集完成后写入stdb库，核心代码:
+
+```
+func (p *performanceCollector) collectContainerCPI() {
+	klog.V(6).Infof("start collectContainerCPI")
+	timeWindow := time.Now()
+	containerStatusesMap := map[*corev1.ContainerStatus]*statesinformer.PodMeta{}
+	podMetas := p.statesInformer.GetAllPods()
+	for _, meta := range podMetas {
+		pod := meta.Pod
+		for i := range pod.Status.ContainerStatuses {
+			containerStat := &pod.Status.ContainerStatuses[i]
+			containerStatusesMap[containerStat] = meta
+		}
+	}
+	// get container CPI collectors for each container
+	collectors := sync.Map{}
+	var wg sync.WaitGroup
+	wg.Add(len(containerStatusesMap))
+	nodeCPUInfoRaw, exist := p.metricCache.Get(metriccache.NodeCPUInfoKey)
+	if !exist {
+		klog.Error("failed to get node cpu info : not exist")
+		return
+	}
+	nodeCPUInfo, ok := nodeCPUInfoRaw.(*metriccache.NodeCPUInfo)
+	if !ok {
+		klog.Fatalf("type error, expect %T, but got %T", metriccache.NodeCPUInfo{}, nodeCPUInfoRaw)
+	}
+	cpuNumber := nodeCPUInfo.TotalInfo.NumberCPUs
+	for containerStatus, parentPod := range containerStatusesMap {
+		go func(status *corev1.ContainerStatus, parent string) {
+			defer wg.Done()
+			collectorOnSingleContainer, err := p.getAndStartCollectorOnSingleContainer(parent, status, cpuNumber, perfgroup.EventsMap["CPICollector"])
+			if err != nil {
+				return
+			}
+			collectors.Store(status, collectorOnSingleContainer)
+		}(containerStatus, parentPod.CgroupDir)
+	}
+	wg.Wait()
+
+	time.Sleep(p.collectTimeWindowDuration)
+	metrics.ResetContainerCPI()
+
+	var wg1 sync.WaitGroup
+	var mutex sync.Mutex
+	wg1.Add(len(containerStatusesMap))
+	cpiMetrics := make([]metriccache.MetricSample, 0)
+	for containerStatus, podMeta := range containerStatusesMap {
+		pod := podMeta.Pod
+		go func(status *corev1.ContainerStatus, pod *corev1.Pod) {
+			defer wg1.Done()
+			// collect container cpi
+			oneCollector, ok := collectors.Load(status)
+			if !ok {
+				return
+			}
+			metrics := p.profileCPIOnSingleContainer(status, oneCollector, pod)
+			mutex.Lock()
+			cpiMetrics = append(cpiMetrics, metrics...)
+			mutex.Unlock()
+		}(containerStatus, pod)
+	}
+	wg1.Wait()
+
+	// save container CPI metric to tsdb
+	p.saveMetric(cpiMetrics)
+
+	p.started.Store(true)
+	klog.V(5).Infof("collectContainerCPI for time window %s finished at %s, container num %d",
+		timeWindow, time.Now(), len(containerStatusesMap))
+}
+```
+
+#### (9) sysresource
+
+这个模块的 核心功能是 排除掉 pod 使用的cpu 以及内存和 主机应用使用的cpu、内存，操作系统用了多少CPU 和 内存.
+
+文件代码:
+
+```
+pkg/koordlet/metricsadvisor/collectors/sysresource/system_resource_collector.go
+```
+
+核心代码解析collectSysResUsed:
+从 podresource 模块获取所有pod 的cpu 以及内存使用情况:
+
+```
+podsCPUUsage, podsMemoryUsage, err := s.getAllPodsResourceUsage()
+```
+
+从hostapp模块获取所有的cpu和内存使用率
+
+```
+hostAppCPU, hostAppMemory := s.sharedState.GetHostAppUsage()
+```
+
+计算系统内存cpu使用情况
+
+```
+systemCPUUsage := util.MaxFloat64(nodeCPU.Value-podsCPUUsage-hostAppCPU.Value, 0)
+	systemMemoryUsage := util.MaxFloat64(nodeMemory.Value-podsMemoryUsage-hostAppMemory.Value, 0)
+```
+
+存储数据库
+
+```
+// commit metric sample
+appender := s.appendableDB.Appender()
+if err := appender.Append([]metriccache.MetricSample{systemCPUMetric, systemMemoryMetric}); err != nil {
+	klog.ErrorS(err, "append system metrics error")
+	return
+}
+if err := appender.Commit(); err != nil {
+	klog.ErrorS(err, "commit system metrics error")
+	return
+}
+
+klog.V(4).Infof("collect system resource usage finished, cpu %v, memory %v", systemCPUUsage, systemMemoryUsage)
+s.started.Store(true)
+```
+
+### (10) coldmemoryresource
+
+这个模块是读取per-cpu，冷页存放的字节数,，处理器cache保存着最近访问的内存。kernel认为最近访问的内存很有可能存在于cache之中。hot-cold page patch因此为per-CPU建立了两个链表（每个内存zone）。当kernel释放的page可能是hot page时(可能在处理器cache中)，那么就把它放入hot链表，否则放入cold链表。 
+
+核心代码位于:
+
+```
+pkg/koordlet/metricsadvisor/collectors/coldmemoryresource/cold_page_kidled.go
+```
+
+核心函数collectColdPageInfo:
+
+读取pod 冷页存储使用统计:
+
+```
+nodeColdPageInfoMetric, err := k.collectNodeColdPageInfo()
+```
+
+读取应用冷页存储使用:
+
+```
+hostAppsColdPageInfoMetric, err := k.collectHostAppsColdPageInfo()
+```
+
+读取物理机冷页使用:
+
+```
+nodeColdPageInfoMetric, err := k.collectNodeColdPageInfo()
+```
+
+冷页使用情况计算:
+
+```
+podColdPageBytes, err := k.cgroupReader.ReadMemoryColdPageUsage(podCgroupDir)
+```
+
+实质上就是在读取操作系统的
+
+```
+/sys/fs/cgroup/memory/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod198f563c_7909_4997_9887_b69c5e345c2b.slice/memory.idle_page_stats
+```
+
+最后用 memory.stat - memory.idle_page_stats 就是percpu hotpage的结果。
+
+#### (11) pagecache
+
+采集主机的 page cache 信息
+
+代码位于:
+
+```
+pkg/koordlet/metricsadvisor/collectors/pagecache/page_cache_collector.go
+```
+
+会定时调用数据到collectNodePageCache，读取pageCache信息:
+
+```
+// 实际就是读取/proc/meminfo
+memInfo, err := koordletutil.GetMemInfo()
+
+```
+
+最后存入tsdb数据库中
+
+```
+appender := p.appendableDB.Appender()
+if err := appender.Append(nodeMetrics); err != nil {
+	klog.ErrorS(err, "Append node metrics error")
+	return
+}
+
+if err := appender.Commit(); err != nil {
+	klog.Warningf("Commit node metrics failed, reason: %v", err)
+	return
+}
+```
+
+#### (12) hostAppCollector
+
+这个模块是读取 koordniator 的 nodeSLO模块下发下来的hostApplication信息。
+
+源码位置:
+
+```
+pkg/koordlet/metricsadvisor/collectors/hostapplication/host_app_collector.go
+```
+
+读取nodeSLo发下来的crd 数据
+
+```
+nodeSLO := h.statesInformer.GetNodeSLO()
+if nodeSLO == nil {
+	klog.Warningf("get nil node slo during collect host application resource usage")
+	return
+}
+```
+
+遍历nodeSLO下发下来的hostApplication数据
+
+```
+
+for _, hostApp := range nodeSLO.Spec.HostApplications {
+}
+```
+
+最后是跟之前的同样逻辑读取应用程序在cgroup 中的内存和cpu 使用情况存入数据库中
+
 
 ### evictVersion
 
@@ -949,3 +1592,7 @@ eviction，即驱赶的意思，意思是当节点出现异常时，kubernetes�
 koordinator 使用 FindSupportedEvictVersion发现驱逐器版本。
 
 ### qosManager
+
+QoS Manager 协调一组插件，这些插件负责按优先级保障 SLO，减少 Pod 之间的干扰。插件根据资源分析、干扰检测以及 SLO 策略配置，在不同场景下动态调整资源参数配置。通常来说，每个插件都会在资源调参过程中生成对应的执行计划。
+
+QoS Manager 可能是迭代频率最高的模块，扩展了新的插件，更新了策略算法并添加了策略执行方式。 一个新的插件应该实现包含一系列标准API的接口，确保 QoS Manager 的核心部分简单且具有较好的可维护性。 高级插件（例如用于干扰检测的插件）会随着时间的推移变得更加复杂，在孵化已经稳定在 QoS Manager 中之后，它可能会成为一个独立的模块。
