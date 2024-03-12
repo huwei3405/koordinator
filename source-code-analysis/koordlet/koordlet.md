@@ -15,6 +15,29 @@ v1.4.0
 ubuntu21.04
 ```
 
+## NodeSLOSpec 解析
+
+koordniator 支持下发CRD 自定义资源NodeSLOSpec
+
+```
+type NodeSLOSpec struct {
+	// BE pods will be limited if node resource usage overload
+	ResourceUsedThresholdWithBE *ResourceThresholdStrategy `json:"resourceUsedThresholdWithBE,omitempty"`
+	// QoS config strategy for pods of different qos-class
+	ResourceQOSStrategy *ResourceQOSStrategy `json:"resourceQOSStrategy,omitempty"`
+	// CPU Burst Strategy
+	CPUBurstStrategy *CPUBurstStrategy `json:"cpuBurstStrategy,omitempty"`
+	//node global system config
+	SystemStrategy *SystemStrategy `json:"systemStrategy,omitempty"`
+	// Third party extensions for NodeSLO
+	Extensions *ExtensionsMap `json:"extensions,omitempty"`
+	// 主机应用的qos管理
+	HostApplications []HostApplicationSpec `json:"hostApplications,omitempty"`
+}
+```
+
+
+
 ## 源码解析 
 
 ### 启动模块分析
@@ -1582,6 +1605,61 @@ for _, hostApp := range nodeSLO.Spec.HostApplications {
 
 最后是跟之前的同样逻辑读取应用程序在cgroup 中的内存和cpu 使用情况存入数据库中
 
+#### (13) beresource
+
+这个模块是收集BestEffort 的CPU，request 和 limit，计算 出request limit usage 等相关数据供给驱逐模块使用
+
+```
+func (b *beResourceCollector) collectBECPUResourceMetric() {
+	klog.V(6).Info("collectBECPUResourceMetric start")
+
+	realMilliLimit, err := b.getBECPURealMilliLimit()
+	if err != nil {
+		klog.Errorf("getBECPURealMilliLimit failed, error: %v", err)
+		return
+	}
+
+	beCPUMilliRequest := b.getBECPURequestMilliCores()
+
+	beCPUUsageMilliCores, err := b.getBECPUUsageMilliCores()
+	if err != nil {
+		klog.Errorf("getBECPUUsageCores failed, error: %v", err)
+		return
+	}
+
+	collectTime := time.Now()
+	beLimit, err01 := metriccache.NodeBEMetric.GenerateSample(
+		metriccache.MetricPropertiesFunc.NodeBE(string(metriccache.BEResourceCPU), string(metriccache.BEResourceAllocationRealLimit)), collectTime, float64(realMilliLimit))
+	beRequest, err02 := metriccache.NodeBEMetric.GenerateSample(
+		metriccache.MetricPropertiesFunc.NodeBE(string(metriccache.BEResourceCPU), string(metriccache.BEResourceAllocationRequest)), collectTime, float64(beCPUMilliRequest))
+	beUsage, err03 := metriccache.NodeBEMetric.GenerateSample(
+		metriccache.MetricPropertiesFunc.NodeBE(string(metriccache.BEResourceCPU), string(metriccache.BEResourceAllocationUsage)), collectTime, float64(beCPUUsageMilliCores))
+
+	if err01 != nil || err02 != nil || err03 != nil {
+		klog.Errorf("failed to collect node BECPU, beLimitGenerateSampleErr: %v, beRequestGenerateSampleErr: %v, beUsageGenerateSampleErr: %v", err01, err02, err03)
+		return
+	}
+
+	beMetrics := make([]metriccache.MetricSample, 0)
+	beMetrics = append(beMetrics, beLimit, beRequest, beUsage)
+
+	appender := b.metricCache.Appender()
+	if err := appender.Append(beMetrics); err != nil {
+		klog.ErrorS(err, "Append node BECPUResource metrics error")
+		return
+	}
+
+	if err := appender.Commit(); err != nil {
+		klog.ErrorS(err, "Commit node BECPUResouce metrics failed")
+		return
+	}
+
+	b.started.Store(true)
+	klog.V(6).Info("collectBECPUResourceMetric finished")
+}
+
+```
+
 
 ### evictVersion
 
@@ -1625,3 +1703,422 @@ ctx := &framework.Context{
 ```
 
 #### (1) blkIOReconcile
+
+代码位置:
+
+```
+pkg/koordlet/qosmanager/plugins/blkio/blkio_reconcile.go
+```
+
+这个模块主要是通过nodeSLo更新应用写入磁盘的速度
+
+getDiskRecorder 表示是否应该删除盘的cgroup配置
+
+```
+/proc/3996/root/BlkioReconcile/blkio/kubepods.slice/kubepods-besteffort.slice/blkio.throttle.read_iops_device
+```
+
+该文件里主要存的内容为:
+
+```
+253:16 2048
+```
+
+```
+fileNames := []string{
+	// blkio.throttle.read_iops_device
+	// 此参数用于设定设备执行“读”操作次数的上限。“读”的操作率以每秒的操作次数来表示。
+	system.BlkioTRIopsName,
+	// blkio.throttle.read_bps_device
+	// 此参数用于设定设备执行“读”操作字节的上限。“读”的操作率以每秒的字节数来限定。
+	system.BlkioTRBpsName,
+	// 此参数用于设定设备执行“写”操作次数的上限。“写”的操作率以每秒的操作次数来表示
+	system.BlkioTWIopsName,
+	// 此参数用于设定设备执行“写”操作字节的上限。“写”的操作率以每秒的字节数来限定。
+	system.BlkioTWBpsName,
+	// blkio.cost.weight
+	system.BlkioIOWeightName,
+}
+
+
+```
+
+getDiskNumberFromBlockCfg 根据配置读取不同的主从设备号
+
+```
+func (b *blkIOReconcile) getDiskNumberFromBlockCfg(block *slov1alpha1.BlockCfg, podMeta *statesinformer.PodMeta) (string, error) {
+	var diskNumber string
+	var err error
+	switch block.BlockType {
+	case slov1alpha1.BlockTypeDevice:
+		if diskNumber, err = b.getDiskNumberFromDevice(block.Name); err != nil {
+			return "", err
+		}
+	case slov1alpha1.BlockTypeVolumeGroup:
+		if diskNumber, err = b.getDiskNumberFromVolumeGroup(block.Name); err != nil {
+			return "", err
+		}
+	case slov1alpha1.BlockTypePodVolume:
+		if podMeta == nil {
+			return "", fmt.Errorf("pod meta is nil")
+		}
+		for _, volume := range podMeta.Pod.Spec.Volumes {
+			if volume.Name == block.Name {
+				// check if kind of volume is pvc or csi ephemeral volume
+				if volume.PersistentVolumeClaim != nil {
+					volumeName := b.statesInformer.GetVolumeName(podMeta.Pod.Namespace, volume.PersistentVolumeClaim.ClaimName)
+					// /var/lib/kubelet/pods/[pod uuid]/volumes/kubernetes.io~csi/[pv name]/mount
+					diskNumber, err = b.getDiskNumberFromPodVolume(podMeta, volumeName)
+					if err != nil {
+						return "", fmt.Errorf("fail to get disk number from pod %s/%s volume %s: %s", podMeta.Pod.Namespace, podMeta.Pod.Name, volumeName, err.Error())
+					}
+				}
+				if volume.CSI != nil {
+					// /var/lib/kubelet/pods/[pod uuid]/volumes/kubernetes.io~csi/[pod ephemeral volume name]/mount
+					diskNumber, err = b.getDiskNumberFromPodVolume(podMeta, volume.Name)
+					if err != nil {
+						return "", fmt.Errorf("fail to get disk number from pod %s/%s volume %s: %s", podMeta.Pod.Namespace, podMeta.Pod.Name, volume.Name, err.Error())
+					}
+				}
+			}
+		}
+		if diskNumber == "" {
+			return "", fmt.Errorf("can not get diskNumber by pod %s/%s volume %s", podMeta.Pod.Namespace, podMeta.Pod.Name, block.Name)
+		}
+	default:
+		return "", fmt.Errorf("block type %s is not supported", block.BlockType)
+	}
+	return diskNumber, nil
+}
+```
+
+得到的主从设备号结果例子:
+
+```
+253:16
+```
+
+更新blkio,更新应用的io 磁盘速率
+
+```
+// dynamicPath for be: kubepods.slice/kubepods-burstable.slice/
+// dynamicPath for pod: kubepods.slice/kubepods-burstable.slice/kubepods-pod7712555c_ce62_454a_9e18_9ff0217b8941.slice/
+func getBlkIOUpdaterFromBlockCfg(block *slov1alpha1.BlockCfg, diskNumber string, dynamicPath string) (resources []resourceexecutor.ResourceUpdater) {
+	var readIOPS, writeIOPS, readBPS, writeBPS, ioweight int64 = DefaultReadIOPS, DefaultWriteIOPS, DefaultReadBPS, DefaultWriteBPS, DefaultIOWeightPercentage
+	// iops
+	if value := block.IOCfg.ReadIOPS; value != nil {
+		readIOPS = *value
+	}
+	if value := block.IOCfg.WriteIOPS; value != nil {
+		writeIOPS = *value
+	}
+	// bps
+	if value := block.IOCfg.ReadBPS; value != nil {
+		readBPS = *value
+	}
+	if value := block.IOCfg.WriteBPS; value != nil {
+		writeBPS = *value
+	}
+	// io weight
+	if weight := block.IOCfg.IOWeightPercent; weight != nil {
+		ioweight = *weight
+
+	}
+
+	readIOPSUpdater, _ := resourceexecutor.NewBlkIOResourceUpdater(
+		system.BlkioTRIopsName,
+		dynamicPath,
+		fmt.Sprintf("%s %d", diskNumber, readIOPS),
+		audit.V(3).Group("blkio").Reason("UpdateBlkIO").Message("update %s/%s to %s", dynamicPath, system.BlkioTRIopsName, fmt.Sprintf("%s %d", diskNumber, readIOPS)),
+	)
+	readBPSUpdater, _ := resourceexecutor.NewBlkIOResourceUpdater(
+		system.BlkioTRBpsName,
+		dynamicPath,
+		fmt.Sprintf("%s %d", diskNumber, readBPS),
+		audit.V(3).Group("blkio").Reason("UpdateBlkIO").Message("update %s/%s to %s", dynamicPath, system.BlkioTRBpsName, fmt.Sprintf("%s %d", diskNumber, readBPS)),
+	)
+	writeIOPSUpdater, _ := resourceexecutor.NewBlkIOResourceUpdater(
+		system.BlkioTWIopsName,
+		dynamicPath,
+		fmt.Sprintf("%s %d", diskNumber, writeIOPS),
+		audit.V(3).Group("blkio").Reason("UpdateBlkIO").Message("update %s/%s to %s", dynamicPath, system.BlkioTWIopsName, fmt.Sprintf("%s %d", diskNumber, writeIOPS)),
+	)
+	writeBPSUpdater, _ := resourceexecutor.NewBlkIOResourceUpdater(
+		system.BlkioTWBpsName,
+		dynamicPath,
+		fmt.Sprintf("%s %d", diskNumber, writeBPS),
+		audit.V(3).Group("blkio").Reason("UpdateBlkIO").Message("update %s/%s to %s", dynamicPath, system.BlkioTWBpsName, fmt.Sprintf("%s %d", diskNumber, writeBPS)),
+	)
+	ioWeightUpdater, _ := resourceexecutor.NewBlkIOResourceUpdater(
+		system.BlkioIOWeightName,
+		dynamicPath,
+		fmt.Sprintf("%s %d", diskNumber, ioweight),
+		audit.V(3).Group("blkio").Reason("UpdateBlkIO").Message("update %s/%s to %s", dynamicPath, system.BlkioIOWeightName, fmt.Sprintf("%s %d", diskNumber, ioweight)),
+	)
+
+	resources = append(resources,
+		readIOPSUpdater,
+		readBPSUpdater,
+		writeIOPSUpdater,
+		writeBPSUpdater,
+		ioWeightUpdater,
+	)
+
+	return
+}
+```
+
+执行带缓存的更新，如果更改内容和缓存比较无变化，则不更新
+
+```
+b.executor.UpdateBatch(true, resources...)
+```
+
+#### (2) cgroupResourcesReconcile
+
+```
+pkg/koordlet/qosmanager/plugins/cgreconcile/cgroup_reconcile.go
+```
+
+核心函数 calculateAndUpdateResources
+
+
+```
+// 读取node信息 
+node := m.statesInformer.GetNode()
+
+// 读取所有pod的元数据
+podMetas := m.statesInformer.GetAllPods()
+```
+
+memory.low：cgroup内存使用如果低于这个值，则内存将尽量不被回收。这是一种是尽力而为的内存保护，这是“软保证”，如果cgroup及其所有子代均低于此阈值，除非无法从任何未受保护的cgroup回收内存，否则不会回收cgroup的内存。
+
+memory.min：这是内存的硬保护机制。如果当前cgroup的内存使用量在min值以内，则任何情况下都不会对这部分内存进行回收。如果没有可用的不受保护的可回收内存，则将oom。这个值会受到上层cgroup的min限制影响，如果所有子一级的min限制总数大于上一级cgroup的min限制，当这些子一级cgroup都要使用申请内存的时候，其总量不能超过上一级cgroup的min。这种情况下，各个cgroup的受保护内存按照min值的比率分配。如果将min值设置的比你当前可用内存还大，可能将导致持续不断的oom。如果cgroup中没有进程，这个值将被忽略。
+
+```
+for _, podMeta := range podMetas {
+		pod := podMeta.Pod
+		// ignore non-running pods
+		if pod.Status.Phase != corev1.PodRunning && pod.Status.Phase != corev1.PodPending {
+			klog.V(5).Infof("skip calculate cgroup summary for non-running pod %s", util.GetPodKey(pod))
+			continue
+		}
+
+		// retrieve pod-level config
+		kubeQoS := apiext.GetKubeQosClass(pod) // assert kubeQoS belongs to {Guaranteed, Burstable, Besteffort}
+		// 读取qos的配置
+		podQoSCfg := helpers.GetPodResourceQoSByQoSClass(pod, nodeCfg)
+		// getMergedPodResourceQoS 资源配置优先级
+		// 
+		mergedPodCfg, err := m.getMergedPodResourceQoS(pod, podQoSCfg)
+		if err != nil {
+			klog.Errorf("failed to retrieve pod resourceQoS, err: %v", err)
+			continue
+		}
+
+		// update summary for qos resources
+		// 更新mergedPodConfig 进入 qosSummary
+		updateCgroupSummaryForQoS(qosSummary[kubeQoS], pod, mergedPodCfg)
+
+		// calculate pod-level and container-level resources and make resourceUpdaters
+		podResources, containerResources := m.calculatePodAndContainerResources(podMeta, node, mergedPodCfg)
+		podLevelResources = append(podLevelResources, podResources...)
+		containerLevelResources = append(containerLevelResources, containerResources...)
+	}
+```
+
+
+完成计算结果后更新入CGROUp
+
+```
+// to make sure the hierarchical cgroup resources are correctly updated, we simply update the resources by
+// cgroup-level order.
+// e.g. /kubepods.slice/memory.min, /kubepods.slice-podxxx/memory.min, /kubepods.slice-podxxx/docker-yyy/memory.min
+leveledResources := [][]resourceexecutor.ResourceUpdater{qosResources, podResources, containerResources}
+m.executor.LeveledUpdateBatch(leveledResources)
+```
+
+#### (3) CPUBurst
+
+##### CPU Burst 介绍
+
+这个模块核心功能是调整 cpu.cfs_burst_us 和 cpu.cfs_quota_us到一个合适的值。
+
+CPU Burst功能允许突发使用的CPU资源依赖于日常的资源积累。比如，容器在日常运行中使用的CPU资源未超过CPU限流，则空余的CPU资源将会被积累。后续当容器运行需要大量CPU资源时，将通过CPU Burst功能突发使用CPU资源，这部分突发使用的资源来源于已积累的资源。以休假体系作为类比：
+
+假如您每年休假时间为4天（CPU限流），未休的假期可以存放起来后续使用，但存放上限为4天（CPU Burst）。当您第一年、第二年各只休了1天的假期，那么没有休息的6天假期可以存放起来。当第三年的时候，理论上您可以休息共计10天的假期，但因为有存放上限（CPU Burst），则实际可以休息至多8天的假期。
+
+设置cpu.cfs_burst_us的值以开启CPU Burst功能。
+
+您可以设置一个适用的正整数启用CPU Burst功能，且这个正整数表示子cgroup突发额外使用的CPU资源的上限。本文通过以下示例场景，介绍如何开启CPU Burst功能。
+
+配置CFS Bandwidth Controller带宽控制器默认的cpu.cfs_quota_us与cpu.cfs_period_us。
+
+以下配置，将CPU资源的使用周期（cpu.cfs_period_us）设置为100ms，每个周期中的CPU限流（cpu.cfs_quota_us）设置为400ms，则子cgroup将会持续获得4个CPU资源（cpu.cfs_quota_us/cpu.cfs_period_us）。
+
+配置cpu.cfs_burst_us以开启CPU Burst功能。
+
+以下配置，将CPU Burst的值设置为600ms，表示开启了CPU Burst功能，且允许子cgroup可以突发额外使用最多6个CPU资源（cpu.cfs_burst_us/cpu.cfs_period_us）。
+
+ 
+```
+echo 600000 > cpu.cfs_burst_us
+```
+
+ 
+```
+echo 400000 > cpu.cfs_quota_us
+echo 100000 > cpu.cfs_period_us
+```
+
+##### 代码解读
+
+代码位置:
+
+```
+pkg/koordlet/qosmanager/plugins/cpuburst/cpu_burst.go
+```
+cpuBurst 定时触发 start，来检测cpu 突发事件，调整到合适的值。
+
+CPUBurst 触发的前置条件
+qos 必须是 LSR LSE BE
+```
+// IsPodCPUBurstable checks if cpu burst is allowed for the pod.
+func IsPodCPUBurstable(pod *corev1.Pod) bool {
+	qosClass := apiext.GetPodQoSClassRaw(pod)
+	return qosClass != apiext.QoSLSR && qosClass != apiext.QoSLSE && qosClass != apiext.QoSBE
+}
+```
+
+关键代码:
+
+```
+
+// 先读pod 的配置，读不到读node
+cpuBurstCfg := genPodBurstConfig(podMeta.Pod, &b.nodeCPUBurstStrategy.CPUBurstConfig)
+if cpuBurstCfg == nil {
+	klog.Warningf("pod %v/%v burst config illegal, burst config %v",
+		podMeta.Pod.Namespace, podMeta.Pod.Name, cpuBurstCfg)
+	continue
+}
+klog.V(5).Infof("get pod %v/%v cpu burst config: %v", podMeta.Pod.Namespace, podMeta.Pod.Name, cpuBurstCfg)
+// set cpu.cfs_burst_us for pod and containers
+b.applyCPUBurst(cpuBurstCfg, podMeta)
+// scale cpu.cfs_quota_us for pod and containers
+b.applyCFSQuotaBurst(cpuBurstCfg, podMeta, nodeState)
+```
+
+容器BurstCpu 计算逻辑:
+
+```
+// container cpu.cfs_burst_us = container.limit * burstCfg.CPUBurstPercent * cfs_period_us
+func calcStaticCPUBurstVal(container *corev1.Container, burstCfg *slov1alpha1.CPUBurstConfig) int64 {
+	if !cpuBurstEnabled(burstCfg.Policy) {
+		klog.V(6).Infof("container %s cpu burst is not enabled, reset as 0", container.Name)
+		return 0
+	}
+	// 读取limit
+	containerCPUMilliLimit := util.GetContainerMilliCPULimit(container)
+	if containerCPUMilliLimit <= 0 {
+		klog.V(6).Infof("container %s spec cpu is unlimited, set cpu burst as 0", container.Name)
+		return 0
+	}
+	//burstCfg.CPUBurstPercent 默认值是1000
+	cpuCoresBurst := (float64(containerCPUMilliLimit) / 1000) * (float64(*burstCfg.CPUBurstPercent) / 100)
+	// CFSBasePeriodValue 默认值是100000
+	containerCFSBurstVal := int64(cpuCoresBurst * float64(system.CFSBasePeriodValue))
+	return containerCFSBurstVal
+}
+
+```
+
+CFSQuota 调整:
+
+```
+b.applyCFSQuotaBurst(cpuBurstCfg, podMeta, nodeState)
+```
+
+
+#### (4) cpuEvictor
+
+官网介绍:
+
+```
+https://koordinator.sh/zh-Hans/docs/user-manuals/cpu-evict
+```
+
+cpuEvictor 模块循环调用
+cpuEvictor->cpuEvict
+
+```
+	// 检查配置是否合法
+	if !isSatisfactionConfigValid(thresholdConfig) {
+		return
+	}
+
+	// 检查节点CPU 满意度是否存在需要释放的cpu 用量
+	milliRelease := c.calculateMilliRelease(thresholdConfig, windowSeconds)
+
+	// 释放BE QOS 的pod
+
+	if milliRelease > 0 {
+		bePodInfos := c.getPodEvictInfoAndSort()
+		c.killAndEvictBEPodsRelease(node, bePodInfos, milliRelease)
+	}
+```
+
+数据来源读取BE_resource 模块采集的指标
+
+```
+	// BECPUUsage
+	avgBECPUMilliUsage, count01 := getBECPUMetric(metriccache.BEResourceAllocationUsage, querier, queryparam.Aggregate)
+	// BECPURequest
+	avgBECPUMilliRequest, count02 := getBECPUMetric(metriccache.BEResourceAllocationRequest, querier, queryparam.Aggregate)
+	// BECPULimit
+	avgBECPUMilliRealLimit, count03 := getBECPUMetric(metriccache.BEResourceAllocationRealLimit, querier, queryparam.Aggregate)
+
+```
+
+通过节点CPU 满意度计算出需要释放的CPU 用量
+
+```
+func calculateResourceMilliToRelease(beCPUMilliRequest, beCPUMilliRealLimit float64, thresholdConfig *slov1alpha1.ResourceThresholdStrategy) int64 {
+	if beCPUMilliRequest <= 0 {
+		klog.V(5).Infof("cpuEvict by ResourceSatisfaction skipped! be pods requests is zero!")
+		return 0
+	}
+
+	satisfactionRate := beCPUMilliRealLimit / beCPUMilliRequest
+	if satisfactionRate > float64(*thresholdConfig.CPUEvictBESatisfactionLowerPercent)/100 {
+		klog.V(5).Infof("cpuEvict by ResourceSatisfaction skipped! satisfactionRate(%.2f) and lowPercent(%f)", satisfactionRate, float64(*thresholdConfig.CPUEvictBESatisfactionLowerPercent))
+		return 0
+	}
+
+	rateGap := float64(*thresholdConfig.CPUEvictBESatisfactionUpperPercent)/100 - satisfactionRate
+	if rateGap <= 0 {
+		klog.V(5).Infof("cpuEvict by ResourceSatisfaction skipped! satisfactionRate(%.2f) > upperPercent(%f)", satisfactionRate, float64(*thresholdConfig.CPUEvictBESatisfactionUpperPercent))
+		return 0
+	}
+
+	milliRelease := beCPUMilliRequest * rateGap
+	return int64(milliRelease)
+}
+```
+
+驱逐 需要释放的pod
+
+```
+	if milliRelease > 0 {
+		bePodInfos := c.getPodEvictInfoAndSort()
+		c.killAndEvictBEPodsRelease(node, bePodInfos, milliRelease)
+	}
+```
+
+
+#### (5) cpusuppress
+
+#### (6) memoryevict
+
+#### (7) resctrl
+
+#### (8) sysreconcile
