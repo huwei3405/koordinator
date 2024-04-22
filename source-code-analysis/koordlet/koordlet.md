@@ -1,5 +1,35 @@
 # koordlet源码分析
-文章分析主要分为静态分析和 动态分析
+
+Koordlet 是部署在 Kubernetes 节点中的 DaemonSet，用于混部资源超卖、干扰检测、QoS 保障等。它由几个模块组成，分别负责信息收集、数据分析和 QoS 管理。 一些模块还提供了框架脚手架，提供了一组插件进行扩展（如"QoS Manager"），以便于添加新策略。
+
+架构:
+
+![img](koordlet-arch-12f76fe4c21480d3db812a902a853e3b.svg)
+
+模块
+Metrics Advisor
+Metric Advisor 提供节点、Pod 和容器的资源使用和性能特征的基本信息。 它是一个独立的模块，定期收集、处理和导出资源画像。它还检测运行容器的干扰，例如 CPU 调度、内存分配延迟和压力阻塞信息（Pressure Stall Information, PSI）。 该信息将广泛用于资源超卖和 QoS 保障插件。
+
+Storage
+Storage 管理来自 Metrics Advisor 和 States Informer 的信息，提供一系列增删改查的API，并对过期数据定期清理。 它有两种类型的数据：静态和时间序列。时间序列类型存储历史数据用于统计目的，例如 CPU 和内存使用情况。静态类型包括节点、Pod 和容器的状态信息，例如节点的 CPU 信息、Pod 的元数据。
+
+States Informer
+States Informer 从 kube-apiserver 和 kubelet 同步节点和 Pod 状态，并将数据作为 static 类型保存到 Storage 中。与其他模块相比，该模块在开发迭代中应该保持相对稳定。
+
+QoS Manager
+QoS Manager 协调一组插件，这些插件负责按优先级保障 SLO，减少 Pod 之间的干扰。插件根据资源分析、干扰检测以及 SLO 策略配置，在不同场景下动态调整资源参数配置。通常来说，每个插件都会在资源调参过程中生成对应的执行计划。
+
+QoS Manager 可能是迭代频率最高的模块，扩展了新的插件，更新了策略算法并添加了策略执行方式。 一个新的插件应该实现包含一系列标准API的接口，确保 QoS Manager 的核心部分简单且具有较好的可维护性。 高级插件（例如用于干扰检测的插件）会随着时间的推移变得更加复杂，在孵化已经稳定在 QoS Manager 中之后，它可能会成为一个独立的模块。
+
+Metrics Reporter
+Metrics Reporter 从 Storage 中读取历史指标和状态数据，然后将它们合并并发送到 ApiServer，这些数据将被 Koordinator Manager 用于资源超卖模型管理。 Metrics Reporter 还支持针对不同混部场景的多种处理算法。
+
+Runtime Hooks
+Runtime Hooks 充当运行时 Hook 管理器的后端服务器。 Runtime Hook 管理器是一个 CRI 代理，它拦截CRI请求，调用后端服务器注入策略，如通过 Pod 优先级设置资源隔离参数，应用资源分配策略。 Runtime Hooks 提供了一个框架来维护不同类型的策略，并在容器的生命周期中提供灵活的扩展点。
+
+例如 Pod 生命周期中的 LLC 隔离注入
+
+![img2](llc-isolation-ee2864c933cc19aaca13902992d83bca.svg)
 
 ## 一、分析环境
 
@@ -17,25 +47,419 @@ ubuntu21.04
 
 ## NodeSLOSpec 解析
 
-koordniator 支持下发CRD 自定义资源NodeSLOSpec
+Koordinator 使用一个 ConfigMap 管理 SLO 配置。该 ConfigMap 被 slo-controller 所使用，它的名字和命名空间可以在 koord-manager 的启 动参数中指定（默认为 koordinator-system/slo-controller-config）。它分别包含了以下键值：
+
+colocation-config：混部配置。例如，是否开启混部 Batch 资源，混部水位线。
+resource-threshold-config：基于阈值的压制/驱逐策略的配置。例如，CPU 压制的阈值，内存驱逐的阈值。
+resource-qos-config：QoS 特性的配置。例如，BE pods 的 Group Identity，LS pods 的内存 QoS，BE pods 的末级缓存划分。
+cpu-burst-config：CPU Burst 特性的配置。例如，pod 的最大 burst 比例。
+system-config：系统设定的配置。例如，全局内存最低水位线系数 min_free_kbytes。
+
+配置层级
+每个配置定义为集群级别和节点级别的形式。
+
+例如，
 
 ```
-type NodeSLOSpec struct {
-	// BE pods will be limited if node resource usage overload
-	ResourceUsedThresholdWithBE *ResourceThresholdStrategy `json:"resourceUsedThresholdWithBE,omitempty"`
-	// QoS config strategy for pods of different qos-class
-	ResourceQOSStrategy *ResourceQOSStrategy `json:"resourceQOSStrategy,omitempty"`
-	// CPU Burst Strategy
-	CPUBurstStrategy *CPUBurstStrategy `json:"cpuBurstStrategy,omitempty"`
-	//node global system config
-	SystemStrategy *SystemStrategy `json:"systemStrategy,omitempty"`
-	// Third party extensions for NodeSLO
-	Extensions *ExtensionsMap `json:"extensions,omitempty"`
-	// 主机应用的qos管理
-	HostApplications []HostApplicationSpec `json:"hostApplications,omitempty"`
+type ColocationCfg struct {
+ColocationStrategy `json:",inline"`
+NodeConfigs        []NodeColocationCfg `json:"nodeConfigs,omitempty"`
+}
+
+type ResourceQOSCfg struct {
+ClusterStrategy *slov1alpha1.ResourceQOSStrategy `json:"clusterStrategy,omitempty"`
+NodeStrategies  []NodeResourceQOSStrategy        `json:"nodeStrategies,omitempty"`
 }
 ```
 
+集群级别配置用于设置全局配置，而节点级别则供用户调整部分节点的配置，特别是灰度部署的情况。
+
+请注意，大部分可配置的字段都在组件内部（koordlet、koord-manager）有默认值，所以通常仅需要编辑变更的参数。
+
+NodeSLO
+SLO 配置的 data 字段会被 koord-manager 解析。Koord-manager 会检查配置数据是否合法，然后用解析后的配置更新到每个节点的 NodeSLO 对象中。 如果解析失败，koord-manager 会在 ConfigMap 对象上记录 Events，以警示 unmarshal 错误。对于 agent 组件 koordlet，它会 watch NodeSLO 的 Spec，并对节点的 QoS 特性进行调谐。
+
+```
+apiVersion: slo.koordinator.sh/v1alpha1
+kind: NodeSLO
+metadata:
+  name: test-node
+spec:
+  cpuBurstStrategy: {}
+  extensions: {}
+  resourceQOSStrategy: {}
+  systemStrategy: {}
+  # parsed from the `resource-threshold-config` data
+  resourceUsedThresholdWithBE:
+    cpuSuppressPolicy: cpuset
+    cpuSuppressThresholdPercent: 65
+    enable: true
+    memoryEvictThresholdPercent: 70
+```
+
+配置
+参考版本：Koordinator v1.2
+
+SLO 配置的模板如下：
+
+```
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slo-controller-config
+  namespace: koordinator-system
+data:
+  # colocation-config is the configuration for colocation.
+  # Related features: Dynamic resource over-commitment, Load-aware scheduling, Load-aware descheduling.
+  # - enable: whether to enable the colocation. If false, the reclaimed resources of the node allocatable (e.g. `kubernetes.io/batch-cpu`) will be removed.
+  # - metricAggregateDurationSeconds: the aggregated duration of node metrics reporting.
+  # - metricReportIntervalSeconds: the reporting interval of the node metrics.
+  # - metricAggregatePolicy: policies of reporting node metrics in different durations.
+  # - cpuReclaimThresholdPercent: the reclaim threshold for calculating the reclaimed cpu resource. Basically, the reclaimed resource cannot reclaim the unused resources which are exceeding the threshold.
+  # - memoryReclaimThresholdPercent: the reclaim threshold for calculating the reclaimed memory resource. Basically, the reclaimed resource cannot reclaim the unused resources which are exceeding the threshold.
+  # - memoryCalculatePolicy: the policy for calculating the reclaimable memory resource. If set to `request`, only unallocated memory resource of high-priority pods are reclaimable, and no allocated memory can be reclaimed.
+  # - degradeTimeMinutes: the threshold duration to degrade the colocation for which the node metrics has not been updated.
+  # - updateTimeThresholdSeconds: the threshold duration to force updating the reclaimed resources with the latest calculated result.
+  # - resourceDiffThreshold: the threshold to update the reclaimed resources than which the calculated reclaimed resources is different from the current.
+  # - nodeConfigs: the node-level configurations which matches the nodes via the node selector and overrides the cluster configuration.
+  colocation-config: |
+    {
+      "enable": false,
+      "metricAggregateDurationSeconds": 300,
+      "metricReportIntervalSeconds": 60,
+      "metricAggregatePolicy": {
+        "durations": [
+          "5m",
+          "10m",
+          "15m"
+        ]
+      },
+      "cpuReclaimThresholdPercent": 60,
+      "memoryReclaimThresholdPercent": 65,
+      "memoryCalculatePolicy": "usage",
+      "degradeTimeMinutes": 15,
+      "updateTimeThresholdSeconds": 300,
+      "resourceDiffThreshold": 0.1,
+      "nodeConfigs": [
+        {
+          "name": "anolis",
+          "nodeSelector": {
+            "matchLabels": {
+              "kubernetes.io/kernel": "anolis"
+            }
+          },
+          "updateTimeThresholdSeconds": 360,
+          "resourceDiffThreshold": 0.2
+        }
+      ]
+    }
+  # The configuration for threshold-based strategies.
+  # Related features: BECPUSuppress, BEMemoryEvict, BECPUEvict.
+  # - clusterStrategy: the cluster-level configuration.
+  # - nodeStrategies: the node-level configurations which matches the nodes via the node selector and overrides the cluster configuration.
+  # - enable: whether to enable the threshold-based strategies or not. If false, all threshold-based strategies are disabled. If set to true, CPU Suppress and Memory Evict are enabled by default.
+  # - cpuSuppressThresholdPercent: the node cpu utilization threshold to suppress BE pods' usage.
+  # - cpuSuppressPolicy: the policy of cpu suppression. If set to `cpuset`, the BE pods' `cpuset.cpus` will be reconciled when suppression. If set to `cfsQuota`, the BE pods' `cpu.cfs_quota_us` will be reconciled.
+  # - memoryEvictThresholdPercent: the node memory utilization threshold to evict BE pods.
+  # - memoryEvictLowerPercent: the node memory utilization threshold to stop the memory eviction. By default, `lowerPercent = thresholdPercent - 2`.
+  # - cpuEvictBESatisfactionLowerPercent: the cpu satisfaction threshold to start the cpu eviction (also require to meet the BE util threshold).
+  # - cpuEvictBEUsageThresholdPercent: the BE utilization (BEUsage / BERealLimit) threshold to start the cpu eviction (also require to meet the cpu satisfaction threshold).
+  # - cpuEvictBESatisfactionUpperPercent: the cpu satisfaction threshold to stop the cpu eviction.
+  # - cpuEvictTimeWindowSeconds: the time window of the cpu metrics for the cpu eviction.
+  resource-threshold-config: |
+    {
+      "clusterStrategy": {
+        "enable": false,
+        "cpuSuppressThresholdPercent": 65,
+        "cpuSuppressPolicy": "cpuset",
+        "memoryEvictThresholdPercent": 70,
+        "memoryEvictLowerPercent": 65,
+        "cpuEvictBESatisfactionUpperPercent": 90,
+        "cpuEvictBESatisfactionLowerPercent": 60,
+        "cpuEvictBEUsageThresholdPercent": 90
+      },
+      "nodeStrategies": [
+        {
+          "name": "anolis",
+          "nodeSelector": {
+            "matchLabels": {
+              "kubernetes.io/kernel": "anolis"
+            }
+          },
+          "cpuEvictBEUsageThresholdPercent": 80
+        }
+      ]
+    }
+  # The configuration for QoS-based features.
+  # Related features: CPUQoS (GroupIdentity), MemoryQoS (CgroupReconcile), ResctrlQoS.
+  # - clusterStrategy: the cluster-level configuration.
+  # - nodeStrategies: the node-level configurations which matches the nodes via the node selector and overrides the cluster configuration.
+  # - lsrClass/lsClass/beClass: the configuration for pods of QoS LSR/LS/BE respectively. 
+  # - cpuQOS: the configuration of CPU QoS.
+  #   - enable: whether to enable CPU QoS. If set to `false`, the related cgroup configs will be reset to the system default.
+  #   - groupIdentity: the priority level of the Group Identity ([-1, 2]). `2` means the highest priority, while `-1` means the lowest priority. Anolis OS required.
+  # - memoryQOS: the configuration of Memory QoS.
+  #   - enable: whether to enable Memory QoS. If set to `false`, the related cgroup configs will be reset to the system default.
+  #   - minLimitPercent: the scale percentage for setting the `memory.min` based on the container's request. It enables the memory protection from the Linux memory reclaim.
+  #   - lowLimitPercent: the scale percentage for setting the `memory.low` based on the container's request. It enables the memory soft protection from the Linux memory reclaim.
+  #   - throttlingPercent: the scale percentage for setting the `memory.high` based on the container's limit. It enables the memory throttling in cgroup level.
+  #   - wmarkRatio: the ratio of container-level asynchronous memory reclaim based on the container's limit. Anolis OS required.
+  #   - wmarkScalePermill: the per-mill of container memory to reclaim in once asynchronous memory reclaim. Anolis OS required.
+  #   - wmarkMinAdj: the adjustment percentage of global memory min watermark. It affects the reclaim priority when the node memory free is quite a few. Anolis OS required.
+  # - resctrlQOS: the configuration of Resctrl (Intel RDT) QoS.
+  #   - enable: whether to enable Resctrl QoS.
+  #   - catRangeStartPercent: the starting percentage of the L3 Cache way partitioning. L3 CAT required.
+  #   - catRangeEndPercent: the ending percentage of the L3 Cache way partitioning. L3 CAT required.
+  #   - mbaPercent: the allocation percentage of the memory bandwidth. MBA required.
+  resource-qos-config: |
+    {
+      "clusterStrategy": {
+        "lsrClass": {
+          "cpuQOS": {
+            "enable": false,
+            "groupIdentity": 2
+          },
+          "memoryQOS": {
+            "enable": false,
+            "minLimitPercent": 0,
+            "lowLimitPercent": 0,
+            "throttlingPercent": 0,
+            "wmarkRatio": 95,
+            "wmarkScalePermill": 20,
+            "wmarkMinAdj": -25,
+            "priorityEnable": 0,
+            "priority": 0,
+            "oomKillGroup": 0
+          },
+          "resctrlQOS": {
+            "enable": false,
+            "catRangeStartPercent": 0,
+            "catRangeEndPercent": 100,
+            "mbaPercent": 100
+          }
+        },
+        "lsClass": {
+          "cpuQOS": {
+            "enable": false,
+            "groupIdentity": 2
+          },
+          "memoryQOS": {
+            "enable": false,
+            "minLimitPercent": 0,
+            "lowLimitPercent": 0,
+            "throttlingPercent": 0,
+            "wmarkRatio": 95,
+            "wmarkScalePermill": 20,
+            "wmarkMinAdj": -25,
+            "priorityEnable": 0,
+            "priority": 0,
+            "oomKillGroup": 0
+          },
+          "resctrlQOS": {
+            "enable": false,
+            "catRangeStartPercent": 0,
+            "catRangeEndPercent": 100,
+            "mbaPercent": 100
+          }
+        },
+        "beClass": {
+          "cpuQOS": {
+            "enable": false,
+            "groupIdentity": -1
+          },
+          "memoryQOS": {
+            "enable": false,
+            "minLimitPercent": 0,
+            "lowLimitPercent": 0,
+            "throttlingPercent": 0,
+            "wmarkRatio": 95,
+            "wmarkScalePermill": 20,
+            "wmarkMinAdj": 50,
+            "priorityEnable": 0,
+            "priority": 0,
+            "oomKillGroup": 0
+          },
+          "resctrlQOS": {
+            "enable": false,
+            "catRangeStartPercent": 0,
+            "catRangeEndPercent": 30,
+            "mbaPercent": 100
+          }
+        }
+      },
+      "nodeStrategies": [
+        {
+          "name": "anolis",
+          "nodeSelector": {
+            "matchLabels": {
+              "kubernetes.io/kernel": "anolis"
+            }
+          },
+          "beClass": {
+            "memoryQOS": {
+              "wmarkRatio": 90
+            }
+          }
+        }
+      ]
+    }
+  # The configuration for the CPU Burst.
+  # Related features: CPUBurst.
+  # - clusterStrategy: the cluster-level configuration.
+  # - nodeStrategies: the node-level configurations which matches the nodes via the node selector and overrides the cluster configuration.
+  # - policy: the policy of CPU Burst. If set to `none`, the CPU Burst is disabled. If set to `auto`, the CPU Burst is fully enabled. If set to `cpuBurstOnly`, only the Linux CFS Burst feature is enabled.
+  # - cpuBurstPercent: the percentage of Linux CFS Burst. It affects the value of `cpu.cfs_burst_us` of pod/container cgroups. It specifies the percentage to which the CPU limit can be increased by CPU Burst.
+  # - cfsQuotaBurstPercent: the percentage of cfs quota burst. It affects the scaled ratio of `cpu.cfs_quota_us` of pod/container cgroups. It specifies the maximum percentage to which the value of cfs_quota in the cgroup parameters can be increased.
+  # - cfsQuotaBurstPeriodSeconds: the maximum period of once cfs quota burst. It indicates that the time period in which the container can run with an increased CFS quota is unlimited.
+  # - sharePoolThresholdPercent: the threshold of share pool utilization. If the share pool utilization is too high, CPU Burst will be stopped and reset to avoid machine overload.
+  cpu-burst-config: |
+    {
+      "clusterStrategy": {
+        "policy": "none",
+        "cpuBurstPercent": 1000,
+        "cfsQuotaBurstPercent": 300,
+        "cfsQuotaBurstPeriodSeconds": -1,
+        "sharePoolThresholdPercent": 50
+      },
+      "nodeStrategies": [
+        {
+          "name": "anolis",
+          "nodeSelector": {
+            "matchLabels": {
+              "kubernetes.io/kernel": "anolis"
+            }
+          },
+          "policy": "cfsQuotaBurstOnly",
+          "cfsQuotaBurstPercent": 400
+        }
+      ]
+    }
+  # The configuration for system-level settings.
+  # Related features: SystemConfig.
+  # - clusterStrategy: the cluster-level configuration.
+  # - nodeStrategies: the node-level configurations which matches the nodes via the node selector and overrides the cluster configuration.
+  # - minFreeKbytesFactor: the factor for calculating the global minimum memory free watermark `/proc/sys/vm/min_free_kbytes`. `min_free_kbytes = minFreeKbytesFactor * nodeTotalMemory / 10000`.
+  # - watermarkScaleFactor: the reclaim factor `/proc/sys/vm/watermark_scale_factor` in once global memory reclaim.
+  # - memcgReapBackGround: whether to enable the reaper for orphan memory cgroups.
+  system-config: |-
+    {
+      "clusterStrategy": {
+        "minFreeKbytesFactor": 100,
+        "watermarkScaleFactor": 150,
+        "memcgReapBackGround": 0
+      }
+      "nodeStrategies": [
+        {
+          "name": "anolis",
+          "nodeSelector": {
+            "matchLabels": {
+              "kubernetes.io/kernel": "anolis"
+            }
+          },
+          "minFreeKbytesFactor": 100,
+          "watermarkScaleFactor": 150
+        }
+      ]
+    }
+  # The configuration for host application settings.
+  # - name: name of the host application.
+  # - qos: QoS class of the application.
+  # - cgroupPath: cgroup path of the application, the directory equals to `${base}/${parentDir}/${relativePath}`.
+  # - cgroupPath.base: cgroup base dir of the application, the format is various across cgroup drivers.
+  # - cgroupPath.parentDir: cgroup parent path under base dir. By default it is "host-latency-sensitive/" for LS and "host-latency-sensitive/" for BE.
+  # - cgroupPath.relativePath: cgroup relative path under parent dir.
+  host-application-config: |
+    {
+      "applications": [
+        {
+          "name": "nginx",
+          "qos": "LS",
+          "cgroupPath": {
+            "base": "CgroupRoot",
+            "parentDir": "host-latency-sensitive/",
+            "relativePath": "nginx/"
+          }
+        }
+      ]
+    }
+```
+
+快速开始
+通过 ConfigMap koordinator-system/slo-controller-config 检查当前的 SLO 配置。
+
+```
+$ kubectl get configmap -n koordinator-system slo-controller-config -o yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  annotations:
+    meta.helm.sh/release-name: koordinator
+    meta.helm.sh/release-namespace: default
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  name: slo-controller-config
+  namespace: koordinator-system
+data:
+  colocation-config: |
+    {
+      "enable": false,
+      "metricAggregateDurationSeconds": 300,
+      "metricReportIntervalSeconds": 60,
+      "cpuReclaimThresholdPercent": 60,
+      "memoryReclaimThresholdPercent": 65,
+      "memoryCalculatePolicy": "usage",
+      "degradeTimeMinutes": 15,
+      "updateTimeThresholdSeconds": 300,
+      "resourceDiffThreshold": 0.1
+    }
+  resource-threshold-config: |
+    {
+      "clusterStrategy": {
+        "enable": false
+      }
+    }
+```
+
+2.编辑 ConfigMap koordinator-system/slo-controller-config 来修改 SLO 配置。
+
+```
+$ kubectl edit configmap -n koordinator-system slo-controller-config
+```
+
+例如，ConfigMap 编辑如下：
+
+```
+data:
+  # ...
+  resource-threshold-config: |
+    {
+      "clusterStrategy": {
+        "enable": true,
+        "cpuSuppressThresholdPercent": 60,
+        "cpuSuppressPolicy": "cpuset",
+        "memoryEvictThresholdPercent": 60
+      }
+    }
+```
+
+3.确认 NodeSLO 是否成功下发。
+注意：默认值会在 NodeSLO 中省略。
+
+```
+$ kubectl get nodeslo.slo.koordinator.sh test-node -o yaml
+apiVersion: slo.koordinator.sh/v1alpha1
+kind: NodeSLO
+metadata:
+  name: test-node
+spec:
+  # ...
+  extensions: {}
+  resourceUsedThresholdWithBE:
+    cpuSuppressPolicy: cpuset
+    cpuSuppressThresholdPercent: 60
+    enable: true
+    memoryEvictThresholdPercent: 60
+```
 
 
 ## 源码解析 
@@ -195,6 +619,14 @@ metricCache 主要提供两种存储能力，具体代码实现位于 pkg/koordl
  - 2、内存存储，存储在sync.Map中。
 
 ### prediction 模块分析
+
+提出峰值预测的目的是为了提高节点利用率并避免过载。 通过分析节点指标的趋势，我们可以估计峰值使用情况并实施更有效的超额分配策略。
+
+节点预测主要在Koordlet和Koord-Manager中实现。 架构如下：
+
+![img](node-prediction-d4858c8d7c31eae03583763d43178dbc.svg)
+
+使用从 Metric Cache 检索到的节点和 Pod 指标，根据预测模型计算预测结果并检查点。
 
 #### 1、PeakPredictServer
 
@@ -1376,6 +1808,10 @@ pod受限率约低，就代表越有充足的资源
 
 ### (8) performance
 
+在真实的生产环境下，单机的运行时状态是一个“混沌系统”，资源竞争产生的应用干扰无法绝对避免。Koordinator正在建立干扰检测与优化的能力，通过提取应用运行状态的指标，进行实时的分析和检测，在发现干扰后对目标应用和干扰源采取更具针对性的策略。 Koordinator已经实现了一系列Performance Collector，在单机侧采集与应用运行状态高相关性的底层指标，并通过Prometheus暴露出来，为干扰检测能力和集群应用调度提供支持。
+
+
+
 使用 libpfm4 库 收集容器的cpu 使用情况，有开关控制，主要是为了看性能问题，收集完成后写入stdb库，核心代码:
 
 ```
@@ -1942,6 +2378,14 @@ m.executor.LeveledUpdateBatch(leveledResources)
 
 ##### CPU Burst 介绍
 
+CPU 突发如何工作
+Kubernetes 允许您指定 CPU 限制，这些限制可以基于分时重用。 如果为容器指定CPU限制，则操作系统会限制该容器在特定时间段内可以使用的CPU资源量。 例如，您将容器的CPU限制设置为2。操作系统内核将容器在每100毫秒内可以使用的CPU时间片限制为200毫秒。
+
+CPU利用率是用于评估容器性能的关键指标。 在大多数情况下，CPU 限制是根据 CPU 利用率指定的。 每毫秒的 CPU 利用率显示出比每秒更多的峰值。 如果容器的CPU利用率在100毫秒内达到限制，操作系统内核会强制进行CPU限制，并且在剩余时间内容器中的线程将被挂起，如下图所示。
+
+![img4](cpu-throttles-95c536acf8176011c03566a2d00dd085.png)
+
+
 这个模块核心功能是调整 cpu.cfs_burst_us 和 cpu.cfs_quota_us到一个合适的值。
 
 CPU Burst功能允许突发使用的CPU资源依赖于日常的资源积累。比如，容器在日常运行中使用的CPU资源未超过CPU限流，则空余的CPU资源将会被积累。后续当容器运行需要大量CPU资源时，将通过CPU Burst功能突发使用CPU资源，这部分突发使用的资源来源于已积累的资源。以休假体系作为类比：
@@ -2047,6 +2491,37 @@ b.applyCFSQuotaBurst(cpuBurstCfg, podMeta, nodeState)
 https://koordinator.sh/zh-Hans/docs/user-manuals/cpu-evict
 ```
 
+简介
+Koordinator提供了CPU的动态压制能力，在混部场景下可以根据高优先级Pod（LS）的资源用量情况， 动态调整低优先级Pod（BE）可以使用的CPU资源上限，当LS Pod的资源用量上升时，koordlet将缩减BE Pod可使用的CPU核心。然而，当LS Pod负载突增时， 可能会导致大量BE Pod被压制在少量CPU上，使得这部分Pod的资源满足度较低，应用运行及其缓慢，甚至额外引入一些内核资源的竞争。
+
+事实上，大部分BE Pod的离线任务都有较好的重试能力，可以接受一定程度的驱逐而换取更高的资源质量。Koordlet提供了基于CPU资源满足度的驱逐策略， 计算被压制部分的CPU利用率和资源满足度，当利用率和资源满足度同时超过配置的阈值时，会依次按更低优先级、更高的Pod CPU利用率对BE Pod进行驱逐， 直至CPU资源满足度恢复到阈值以上。
+
+![img5](cpu-evict-2b032557e0eb8d8c0ef853a69c03e592.svg)
+
+操作步骤
+使用以下ConfigMap，创建configmap.yaml文件
+
+```
+#ConfigMap slo-controller-config 样例。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slo-controller-config # 以koord-manager实际配置的名字为准，例如ack-slo-config
+  namespace: koordinator-system # 命名空间以环境中实际安装的情况为准，例如kube-system
+data:
+  # 开启基于CPU资源满足度的驱逐功能。
+  resource-threshold-config: |
+    {
+      "clusterStrategy": {
+        "enable": true,
+        "cpuEvictBESatisfactionLowerPercent": 60,
+        "cpuEvictBESatisfactionUpperPercent": 80,
+        "cpuEvictBEUsageThresholdPercent": 90,
+        "CPUEvictTimeWindowSeconds": 60
+      }
+    }9
+```
+
 cpuEvictor 模块循环调用
 cpuEvictor->cpuEvict
 
@@ -2105,6 +2580,20 @@ func calculateResourceMilliToRelease(beCPUMilliRequest, beCPUMilliRealLimit floa
 }
 ```
 
+当利用率和资源满足度同时超过配置的阈值时，会依次按更低优先级、更高的Pod CPU利用率对BE Pod进行驱逐， 直至CPU资源满足度恢复到阈值以上。
+
+```
+sort.Slice(bePodInfos, func(i, j int) bool {
+	// 没有权重或者权重相同，按CPU利用率降序排序
+	if bePodInfos[i].pod.Spec.Priority == nil || bePodInfos[j].pod.Spec.Priority == nil ||
+		*bePodInfos[i].pod.Spec.Priority == *bePodInfos[j].pod.Spec.Priority {
+		return bePodInfos[i].cpuUsage > bePodInfos[j].cpuUsage
+	}
+	// 按照权重排序
+	return *bePodInfos[i].pod.Spec.Priority < *bePodInfos[j].pod.Spec.Priority
+})
+```
+
 驱逐 需要释放的pod
 
 ```
@@ -2116,9 +2605,271 @@ func calculateResourceMilliToRelease(beCPUMilliRequest, beCPUMilliRealLimit floa
 
 
 #### (5) cpusuppress
+为了保证共置场景下不同工作负载的运行质量，Koordinator 在节点侧使用 koordlet 提供的 CPU Suppress 机制，在负载增加时抑制 Best Effort 类型的工作负载。 或者在负载减少时增加“尽力而为”类型工作负载的资源配额。
+
+在Koordinator提供的动态资源复用模型中，回收的资源总量根据延迟敏感（LS/LSR/LSE）Pod的实际使用资源量动态变化。 回收的资源可供 BE Pod 使用。 您可以使用动态资源复用功能，通过在集群中同时部署LS Pod和BE Pod来提高集群的资源利用率。 为了确保节点上的 LS Pod 有足够的 CPU 资源，您可以使用 koordinator 来限制节点上的 BE Pod 的 CPU 使用率。 弹性资源限制功能可以将节点的资源利用率维持在指定阈值以下，并限制 BE pod 可以使用的 CPU 资源量。 这样保证了节点上容器的稳定性。
+
+CPU Threshold表示节点的CPU利用率阈值。 Pod (LS).Usage 表示 LS Pod 的 CPU 使用率。 BE 的 CPU 限制表示 BE Pod 的 CPU 使用率。 BE Pod 可以使用的 CPU 资源量会根据 LS Pod 的 CPU 使用率的增减进行调整。 建议动态资源复用模型中的CPU Threshold和保留CPU水印使用相同的值。 这可确保 CPU 资源利用率保持一致
+
+![img7](cpu-evict-2b032557e0eb8d8c0ef853a69c03e592.svg)
+
+定时调用memoryEvict
+
+```
+go wait.Until(m.memoryEvict, m.evictInterval, stopCh)
+```
+
+代码位置:
+
+```
+pkg/koordlet/qosmanager/plugins/cpusuppress/cpu_suppress.go
+```
+
+压制cpu数量主要是压制BE级别的pod
+
+读取 指标信息
+
+```
+// 读取pod指标
+podMetrics := helpers.CollectAllPodMetricsLast(r.statesInformer, r.metricCache, metriccache.PodCPUUsageMetric, r.metricCollectInterval)
+
+// 读取node cpu 使用率
+nodeCPUUsage, err := helpers.CollectorNodeMetricLast(r.metricCache, queryMeta, r.metricCollectInterval)
+
+// 读取cpu使用率
+hostAppMetrics := helpers.CollectAllHostAppMetricsLast(nodeSLO.Spec.HostApplications, r.metricCache,
+		metriccache.HostAppCPUUsageMetric, r.metricCollectInterval)
+
+// 压制cpu的数量值
+suppressCPUQuantity := r.calculateBESuppressCPU(node, nodeCPUUsage, podMetrics, podMetas,
+		nodeSLO.Spec.HostApplications, hostAppMetrics,
+		*nodeSLO.Spec.ResourceUsedThresholdWithBE.CPUSuppressThresholdPercent)		
+```
+
+选择压制的cpu策略，如果是cfs 公平策略数量调整
+
+```
+r.adjustByCfsQuota(suppressCPUQuantity, node)
+```
+
+cpu.cfs_period_us为一个调度周期的时间，cpu.cfs_quota_us表示一个调度周期内，可以使用的cpu时间，故cpu.cfs_quota_us/cpu.cfs_period_us就是cpu使用率。
+
+实际是调整文件:
+
+```
+/sys/fs/cgroup/cpu/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod5dbe5657_826e_43bf_a3e6_b69f854fd160.slice/cpu.cfs_quota_us
+```
+
+如果调整的是cpuset策略
+
+```
+r.adjustByCPUSet(suppressCPUQuantity, nodeCPUInfo)
+```
+
+实际就是调整的
+```
+/sys/fs/cgroup/cpuset/kubepods-besteffort-pod5dbe5657_826e_43bf_a3e6_b69f854fd160.slice\:cri-containerd\:ad1eab130880719b47891726aaf320a87a1841f5263c2eed7008753fadb1cce6/cpuset.cpus
+```
+
+限制服务在某个cpu上运行，如:
+设置程序的运行只能在1号cpu执行
+
+```
+echo 1 > /sys/fs/cgroup/cpuset/test/cpuset.cpus
+```	 
 
 #### (6) memoryevict
 
+Koordinator支持了将节点空闲资源动态超卖给低优先级Pod，在混部场景下，节点实际的内存资源用量时刻在变化，对于内存这类不可压缩类型的资源， 当节点资源用量较高时，可能会引发整机内存OOM，导致高优先级Pod的进程被kill。为防止这一情况发生，Koordiantor提供了基于单机内存用量的驱逐策略。 单机组件Koordlet会以秒级粒度持续探测整机内存的用量情况（Total-Available），当整机资源内存用量较高时，会将低优先级的BE类型Pod驱逐， 保障高优先级Pod的服务质量。在驱逐过程中会首先选择优先级(Pod.Spec.Priority)更低的Pod进行驱逐，若优先级相同， 则优先驱逐内存资源用量更多的Pod，直至整机内存用量降低到配置的安全水位（evictThreshold）以下。
+
+![img8](cpu-suppress-demo-cb563497d58bcee0e9b38996fc9e4f17.svg)
+
+```
+// 读取nodelos 
+nodeSLO := m.statesInformer.GetNodeSLO()
+```
+
+计算需要释放的cpu 量
+```
+memoryNeedRelease := memoryCapacity * (nodeMemoryUsage - lowerPercent) / 100
+```
+
+读取BE 级别的pod，并且排序
+
+```
+func (m *memoryEvictor) getSortedBEPodInfos(podMetricMap map[string]float64) []*podInfo {
+
+	var bePodInfos []*podInfo
+	for _, podMeta := range m.statesInformer.GetAllPods() {
+		pod := podMeta.Pod
+		if extension.GetPodQoSClassRaw(pod) == extension.QoSBE {
+			info := &podInfo{
+				pod:     pod,
+				memUsed: podMetricMap[string(pod.UID)],
+			}
+			bePodInfos = append(bePodInfos, info)
+		}
+	}
+
+	sort.Slice(bePodInfos, func(i, j int) bool {
+		// TODO: https://github.com/koordinator-sh/koordinator/pull/65#discussion_r849048467
+		// compare priority > podMetric > name
+		if bePodInfos[i].pod.Spec.Priority != nil && bePodInfos[j].pod.Spec.Priority != nil && *bePodInfos[i].pod.Spec.Priority != *bePodInfos[j].pod.Spec.Priority {
+			return *bePodInfos[i].pod.Spec.Priority < *bePodInfos[j].pod.Spec.Priority
+		}
+		if bePodInfos[i].memUsed != 0 && bePodInfos[j].memUsed != 0 {
+			//return bePodInfos[i].podMetric.MemoryUsed.MemoryWithoutCache.Value() > bePodInfos[j].podMetric.MemoryUsed.MemoryWithoutCache.Value()
+			return bePodInfos[i].memUsed > bePodInfos[j].memUsed
+		} else if bePodInfos[i].memUsed == 0 && bePodInfos[j].memUsed == 0 {
+
+			return bePodInfos[i].pod.Name > bePodInfos[j].pod.Name
+		}
+		return bePodInfos[j].memUsed == 0
+	})
+
+	return bePodInfos
+}
+```
+
+驱逐pod
+
+```
+m.evictor.EvictPodsIfNotEvicted(killedPods, node, resourceexecutor.EvictPodByNodeMemoryUsage, message)
+```
+
+
+##### ConfigMap
+
+```
+#ConfigMap slo-controller-config 样例。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slo-controller-config # 以koord-manager实际配置的名字为准，例如ack-slo-config
+  namespace: koordinator-system # 命名空间以环境中实际安装的情况为准，例如kube-system
+data:
+  # 开启基于内存用量的驱逐功能。
+  resource-threshold-config: |
+    {
+      "clusterStrategy": {
+        "enable": true,
+        "memoryEvictThresholdPercent": 70
+      }
+    }
+```
+
 #### (7) resctrl
 
+##### resctrl 简介
+
+Resctrl文件系统是Linux内核在4.10提供的对RDT技术的支持，作为一个伪文件系统在使用方式上与cgroup是类似，通过提供一系列的文件为用户态提供查询和修改接口。
+
+resctrl的使用存在两个限制：
+
+1、内核版本4.10+
+2、cpu提供rdt能力，检查是否支持可以查看/proc/cpuinfo文件，查看flags是否包含以下特性
+
+挂载
+
+```
+mount -t resctrl resctrl /sys/fs/resctrl
+```
+
+创建rdt_group
+rdt_group只能够创建在根目录下，不允许嵌套，这是和cgroup的一个区别。只需要通过mkdir创建新目录即可。
+
+```
+mkdir /sys/fs/resctrl/rdt_group_demo
+```
+
 #### (8) sysreconcile
+
+这个模块是调节内核系统参数,核心代码
+
+```
+pkg/koordlet/qosmanager/plugins/sysreconcile/system_config.go
+```
+
+核心调用路径:
+
+```
+systemConfig->reconcile
+// 读取内存信息
+memoryCapacity := node.Status.Capacity.Memory().Value()
+```
+
+```
+//计算min水位线
+minFreeKbytes := totalMemory * *strategy.MinFreeKbytesFactor / 10000
+```
+
+调整min水位线其实就是修改
+
+```
+/proc/sys/vm/min_free_kbytes
+```
+
+通过内核的watermark_scale_factor调整min水位线和low水位线之间的差值，以应对业务突发申请内存的情况。
+
+watermark_scale_factor的默认值为总内存的0.1%，最小值（即min水位线和low水位线之间的最小差值）为0.5*min水位线。调整watermark_scale_factor的命令如下：
+sysctl -w vm.watermark_scale_factor = value
+
+修改文件位置
+
+```
+/proc/sys/vm/watermark_scale_factor
+```
+
+"Background kthread reaper"模式，会在后台自动进行周期性回收，永久运行。推荐使用此模式。
+
+默认值为0,表示禁用此功能。设置1开启。
+
+```
+/sys/kernel/mm/memcg_reaper/reap_background
+```
+
+
+### runtimehooks
+
+初始化运行时钩子
+
+```
+runtimeHook, err := runtimehooks.NewRuntimeHook(statesInformer, config.RuntimeHookConf)
+```
+
+运行Nri Server
+
+```
+nriServer, err = nri.NewNriServer(nriServerOptions)
+```
+
+NriServer grpc 钩子,这三个钩子的触发主要是runtime-proxy:
+
+```
+func (p *NriServer) RunPodSandbox(pod *api.PodSandbox)
+func (p *NriServer) CreateContainer(pod *api.PodSandbox, container *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error)
+func (p *NriServer) UpdateContainer(pod *api.PodSandbox, container *api.Container) ([]*api.ContainerUpdate, error)
+
+```
+
+触发钩子埋点：
+
+```
+err := hooks.RunHooks(p.options.PluginFailurePolicy, rmconfig.PreRunPodSandbox, podCtx)
+```
+
+设置pod资源,运行函数SetPodResources:
+
+```
+err := p.SetPodCPUShares(proto)
+err1 := p.SetPodCFSQuota(proto)
+err2 := p.SetPodMemoryLimit(proto)
+```
+
+这几个函数的核心目的是使用koordniator规定的batch-cpu，batch-memory来限制资源
+
+最后执行限制:
+
+```
+podCtx.NriDone(p.options.Executor)
+```
